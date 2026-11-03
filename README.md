@@ -37,7 +37,7 @@ FreeCut se publica como sitio estático en `freecut.cincodadosrojos3d.cl`; Nginx
 
 El beta está protegido con HTTP Basic Auth de Nginx. Crea el archivo de contraseñas fuera del webroot, por ejemplo con `htpasswd -B -c /etc/nginx/.htpasswd-freecut usuario-beta`, y limita sus permisos al usuario/grupo de Nginx. En Debian/Ubuntu, `htpasswd` se instala con `apache2-utils`; en otras distribuciones el paquete suele llamarse `httpd-tools`. Nunca guardes credenciales en este repositorio.
 
-El servidor Linux descarga el código directamente desde GitHub, compila la aplicación y publica una release. No hace falta un runner self-hosted, exponer SSH a Internet ni guardar llaves de despliegue en GitHub. El workflow [build.yml](./.github/workflows/build.yml) solo comprueba que la app compile en GitHub; no accede al servidor ni realiza despliegues.
+El servidor Linux descarga el código directamente desde GitHub, compila la aplicación y publica una release. No hace falta GitHub Actions, un runner self-hosted, exponer SSH a Internet ni guardar llaves de despliegue en GitHub.
 
 Configuración inicial:
 
