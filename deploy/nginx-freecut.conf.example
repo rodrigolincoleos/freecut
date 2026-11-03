@@ -1,0 +1,43 @@
+server {
+    listen 80;
+    server_name freecut.cincodadosrojos3d.cl;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name freecut.cincodadosrojos3d.cl;
+
+    ssl_certificate /etc/letsencrypt/live/freecut.cincodadosrojos3d.cl/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/freecut.cincodadosrojos3d.cl/privkey.pem;
+
+    root /home/sodro/freecut/current/dist;
+    index index.html;
+    autoindex off;
+
+    auth_basic "FreeCut Beta";
+    auth_basic_user_file /etc/nginx/.htpasswd-freecut;
+
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
+    location = /sw.js {
+        add_header Cache-Control "no-cache";
+    }
+
+    location = /manifest.webmanifest {
+        add_header Cache-Control "no-cache";
+    }
+
+    location /assets/ {
+        try_files $uri =404;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

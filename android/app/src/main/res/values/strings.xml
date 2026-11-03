@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">FreeCut</string>
+    <string name="title_activity_main">FreeCut</string>
+    <string name="package_name">com.freecut.editor</string>
+    <string name="custom_url_scheme">com.freecut.editor</string>
+</resources>

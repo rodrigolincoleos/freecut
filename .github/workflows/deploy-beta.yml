@@ -1,0 +1,71 @@
+name: Build and deploy beta
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freecut-beta-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build production app
+        run: npm run build
+
+      - name: Upload production files
+        uses: actions/upload-artifact@v4
+        with:
+          name: freecut-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, freecut-deploy]
+    steps:
+      - name: Download production files
+        uses: actions/download-artifact@v4
+        with:
+          name: freecut-dist
+          path: ${{ runner.temp }}/freecut-dist-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Publish release atomically
+        env:
+          RELEASE_ID: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -eu
+          base=/home/sodro/freecut
+          release="$base/releases/$RELEASE_ID"
+
+          mkdir -p "$base/releases" "$release/dist"
+          cp -a "$RUNNER_TEMP/freecut-dist-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/." "$release/dist/"
+
+          if [ -e "$base/current.next" ] || [ -L "$base/current.next" ]; then
+            rm -f "$base/current.next"
+          fi
+          ln -s "$release" "$base/current.next"
+          mv -Tf "$base/current.next" "$base/current"
