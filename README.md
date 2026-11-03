@@ -33,27 +33,45 @@ La PWA funciona en navegadores compatibles bajo HTTPS (o localhost). El service 
 
 ## Beta en Nginx
 
-FreeCut se publica como sitio estático en `freecut.cincodadosrojos3d.cl`; no necesita Node.js ni un proceso de servidor en producción. El ejemplo de Nginx está en [`deploy/nginx-freecut.conf.example`](./deploy/nginx-freecut.conf.example) y usa un webroot separado (`/home/sodro/freecut`), sin cambiar el sitio principal. Ajusta las rutas del certificado a las que realmente use tu servidor antes de habilitarlo.
+FreeCut se publica como sitio estático en `freecut.cincodadosrojos3d.cl`; Nginx no necesita mantener un proceso Node.js en producción, aunque el script de despliegue usa Node.js para compilar en el servidor. El ejemplo de Nginx está en [`deploy/nginx-freecut.conf.example`](./deploy/nginx-freecut.conf.example) y usa un webroot separado (`/home/sodro/freecut`), sin cambiar el sitio principal. Ajusta las rutas del certificado a las que realmente use tu servidor antes de habilitarlo.
 
 El beta está protegido con HTTP Basic Auth de Nginx. Crea el archivo de contraseñas fuera del webroot, por ejemplo con `htpasswd -B -c /etc/nginx/.htpasswd-freecut usuario-beta`, y limita sus permisos al usuario/grupo de Nginx. En Debian/Ubuntu, `htpasswd` se instala con `apache2-utils`; en otras distribuciones el paquete suele llamarse `httpd-tools`. Nunca guardes credenciales en este repositorio.
 
-El workflow [deploy-beta.yml](./.github/workflows/deploy-beta.yml) compila en un runner hospedado por GitHub y publica la compilación en un runner self-hosted del servidor. El servidor usa una IP privada, así que no hace falta exponer SSH a Internet ni guardar una llave SSH de despliegue en GitHub. Se despliega al hacer push a `main`; también se puede iniciar manualmente desde GitHub Actions, solo para la rama `main`. No se despliega desde pull requests.
+El servidor Linux descarga el código directamente desde GitHub, compila la aplicación y publica una release. No hace falta un runner self-hosted, exponer SSH a Internet ni guardar llaves de despliegue en GitHub. El workflow [build.yml](./.github/workflows/build.yml) solo comprueba que la app compile en GitHub; no accede al servidor ni realiza despliegues.
 
 Configuración inicial:
 
-1. En GitHub, abre `rodrigolincoleos/freecut` → **Settings → Actions → Runners → New self-hosted runner**. Sigue las instrucciones generadas por GitHub para Linux x64; no compartas ni guardes el token temporal del runner en el repositorio. Registra el runner con la etiqueta adicional `freecut-deploy`.
-2. Ejecuta el runner como un usuario Linux dedicado, sin privilegios de root. Ese usuario necesita permiso para crear directorios y actualizar enlaces dentro de `/home/sodro/freecut`. El runner de este repositorio puede ejecutar workflows de despliegue; mantén el acceso de escritura al repositorio limitado a personas de confianza y protege la rama `main`.
-3. Como el webroot está bajo `/home/sodro`, el usuario de los workers de Nginx necesita permiso de recorrido en `/home/sodro` y acceso de lectura a las releases. Identifica el usuario con la directiva `user` de `/etc/nginx/nginx.conf` (o revisando los procesos worker), y configura ACL solo para ese usuario: permiso `--x` en `/home/sodro` y `/home/sodro/freecut`, y lectura/recorrido (`r-X`) en `/home/sodro/freecut/releases`, también como ACL predeterminada para las releases futuras. No hagas el directorio personal globalmente legible.
-4. Crea el archivo de contraseñas de Basic Auth fuera del webroot, por ejemplo con `htpasswd -B -c /etc/nginx/.htpasswd-freecut usuario-beta`, y limita sus permisos al usuario/grupo de Nginx. En Debian/Ubuntu, `htpasswd` se instala con `apache2-utils`; en otras distribuciones el paquete suele llamarse `httpd-tools`. Nunca guardes credenciales en este repositorio.
-5. Ajusta las rutas del certificado en la configuración de Nginx a las que realmente use tu servidor. Si ya existe un bloque para ese subdominio, intégralo en vez de habilitar un duplicado. Valida y recarga Nginx con `sudo nginx -t` y `sudo systemctl reload nginx`.
+1. Confirma que el servidor tiene Git, Node.js 22.12 o posterior, npm y conexión saliente HTTPS a `github.com`. El repositorio es público, así que no se requiere token para clonarlo.
+2. Desde una sesión SSH en el servidor, clona el repositorio a una carpeta de trabajo separada del webroot:
 
-Cada ejecución crea una carpeta de release bajo `/home/sodro/freecut/releases` y cambia el enlace `current` al terminar la copia, sin modificar el directorio del sitio principal ni dejar una actualización parcial servida. Conserva las releases anteriores para rollback. En caso de que el runner deje de estar disponible, la app actualmente publicada sigue sirviéndose desde la última release.
+   ```sh
+   git clone --branch main https://github.com/rodrigolincoleos/freecut.git /home/sodro/freecut-source
+   ```
+
+3. Como `sodro`, ejecuta el script desde esa copia:
+
+   ```sh
+   bash /home/sodro/freecut-source/deploy/deploy-from-github.sh
+   ```
+
+4. Como el webroot está bajo `/home/sodro`, el usuario de los workers de Nginx necesita permiso de recorrido en `/home/sodro` y acceso de lectura a las releases. Identifica el usuario con la directiva `user` de `/etc/nginx/nginx.conf` (o revisando los procesos worker), y configura ACL solo para ese usuario: permiso `--x` en `/home/sodro` y `/home/sodro/freecut`, y lectura/recorrido (`r-X`) en `/home/sodro/freecut/releases`, también como ACL predeterminada para las releases futuras. No hagas el directorio personal globalmente legible.
+5. Crea el archivo de contraseñas de Basic Auth fuera del webroot, por ejemplo con `htpasswd -B -c /etc/nginx/.htpasswd-freecut usuario-beta`, y limita sus permisos al usuario/grupo de Nginx. En Debian/Ubuntu, `htpasswd` se instala con `apache2-utils`; en otras distribuciones el paquete suele llamarse `httpd-tools`. Nunca guardes credenciales en este repositorio.
+6. Ajusta las rutas del certificado en la configuración de Nginx a las que realmente use tu servidor. Si ya existe un bloque para ese subdominio, intégralo en vez de habilitar un duplicado. Valida y recarga Nginx con `sudo nginx -t` y `sudo systemctl reload nginx`.
+
+Para cada despliegue, actualiza la copia de trabajo y vuelve a ejecutar el script:
+
+```sh
+git -C /home/sodro/freecut-source pull --ff-only
+bash /home/sodro/freecut-source/deploy/deploy-from-github.sh
+```
+
+Cada ejecución clona y compila `main` limpio, crea una carpeta de release bajo `/home/sodro/freecut/releases` y cambia el enlace `current` al terminar. No modifica el directorio del sitio principal ni deja una actualización parcial servida. Conserva las releases anteriores para rollback.
 
 Para revertir una publicación, sustituye `<release-anterior>` por el nombre de una carpeta existente bajo `releases` y ejecuta:
 
 ```sh
-ln -s /home/sodro/freecut/releases/<release-anterior> /home/sodro/freecut/current.rollback
-mv -Tf /home/sodro/freecut/current.rollback /home/sodro/freecut/current
+ln -s /home/sodro/freecut/releases/<release-anterior> /home/sodro/freecut/.current.rollback
+mv -Tf /home/sodro/freecut/.current.rollback /home/sodro/freecut/current
 ```
 
 Basic Auth restringe el acceso a la aplicación, pero no crea cuentas dentro de FreeCut. Los proyectos y medios se almacenan localmente en el navegador de cada tester; no se suben al servidor ni se sincronizan entre dispositivos. Como en otras PWA, un dispositivo que ya inició sesión puede conservar recursos en caché para uso offline; quitarle acceso al servidor no borra esa caché local.
