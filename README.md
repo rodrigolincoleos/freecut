@@ -56,6 +56,8 @@ La app no muestra herramientas ni carga proyectos hasta que Auth0 resuelve una s
 
 El proyecto anterior guardado con la clave local `default` queda sin asignar. La primera cuenta puede importarlo explícitamente; la operación registra una única cuenta propietaria en ese navegador y conserva intacta la copia original. Cada cuenta tiene un espacio local distinto basado en el `sub` Auth0. Esto no sincroniza proyectos entre dispositivos ni reemplaza una autorización de servidor para proyectos en nube. Aún no existen endpoints ni panel de administración; los claims ADMIN son una base para futuras funciones, no crean APIs administrativas.
 
+Si la apertura de un proyecto local queda esperando, cierra las demás pestañas o ventanas de FreeCut y vuelve a intentar. La aplicación informa si IndexedDB está bloqueada o tarda demasiado; ese mensaje no implica que los proyectos se hayan borrado.
+
 El frontend sigue siendo estático: Nginx sirve los recursos y reenvía `/api/` a FastAPI en `127.0.0.1:8765`. El ejemplo completo está en [`deploy/nginx-freecut.conf.example`](./deploy/nginx-freecut.conf.example). Retira el `auth_basic` compartido del virtual host FreeCut: además de duplicar el login, su header Basic es incompatible con el `Authorization: Bearer` de la API. Nginx debe reenviar `Authorization` al servicio y no cachear `/api/`. Revisa el archivo real del host, prueba `sudo nginx -t` y recarga solo en la ventana de despliegue aprobada.
 
 El servicio procesa una transcripción a la vez, limita cada carga a 512 MB y elimina los temporales también en caso de error. Instala o actualiza su entorno y configuración systemd después de actualizar el código:

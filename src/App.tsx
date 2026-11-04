@@ -276,6 +276,7 @@ function App() {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('loading')
   const [storageAvailable, setStorageAvailable] = useState(false)
   const [isReady, setIsReady] = useState(false)
+  const [projectLoadError, setProjectLoadError] = useState('')
   const [isRestoringBackup, setIsRestoringBackup] = useState(false)
   const [activePanel, setActivePanel] = useState<Panel>('media')
   const [isPlaying, setIsPlaying] = useState(false)
@@ -414,10 +415,11 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
+    setProjectLoadError('')
     if (!ownerId) {
       setStorageAvailable(false)
       setSaveStatus('error')
-      setNotice('No se pudo determinar tu identidad Auth0 para abrir el proyecto.')
+      setProjectLoadError('No se pudo determinar tu identidad Auth0 para abrir el proyecto.')
       setLegacyProjectState('none')
       setIsReady(true)
       return () => {
@@ -437,7 +439,7 @@ function App() {
       if (cancelled) return
       setStorageAvailable(false)
       setSaveStatus('error')
-      setNotice(error instanceof Error ? `No se pudo abrir el proyecto guardado: ${error.message}` : 'No se pudo abrir el proyecto guardado.')
+      setProjectLoadError(error instanceof Error ? `No se pudo abrir el proyecto guardado: ${error.message}` : 'No se pudo abrir el proyecto guardado.')
       setIsReady(true)
     })
     return () => {
@@ -1469,6 +1471,16 @@ function App() {
       <main className="app-shell loading-screen" aria-busy="true">
         <span className="spinner" />
         <p>Abriendo tu proyecto…</p>
+      </main>
+    )
+  }
+  if (projectLoadError) {
+    return (
+      <main className="app-shell loading-screen">
+        <p role="alert">{projectLoadError}</p>
+        <button className="auth-submit" type="button" onClick={() => window.location.reload()}>
+          Volver a intentar
+        </button>
       </main>
     )
   }

@@ -30,29 +30,61 @@ interface FreeCutDatabase extends DBSchema {
 
 let databasePromise: Promise<IDBPDatabase<FreeCutDatabase>> | undefined
 
+function openDatabase() {
+  let connection: IDBPDatabase<FreeCutDatabase> | undefined
+  let settled = false
+
+  return new Promise<IDBPDatabase<FreeCutDatabase>>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error('La base local tardó demasiado en abrirse. Cierra las demás pestañas o ventanas de FreeCut e inténtalo otra vez. Tus proyectos no se han borrado.'))
+    }, 15000)
+
+    const fail = (error: unknown) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeout)
+      reject(error)
+    }
+
+    openDB<FreeCutDatabase>(DATABASE_NAME, DATABASE_VERSION, {
+      upgrade(database) {
+        if (!database.objectStoreNames.contains('projects')) {
+          database.createObjectStore('projects')
+        }
+        if (!database.objectStoreNames.contains('assets')) {
+          database.createObjectStore('assets', { keyPath: 'id' })
+        }
+        if (!database.objectStoreNames.contains('ownership')) {
+          database.createObjectStore('ownership')
+        }
+      },
+      blocked() {
+        fail(new Error('Otra pestaña o ventana de FreeCut está bloqueando la actualización de la base local. Ciérrala e inténtalo otra vez. Tus proyectos no se han borrado.'))
+      },
+      blocking() {
+        databasePromise = undefined
+        connection?.close()
+      },
+    }).then((database) => {
+      connection = database
+      if (settled) {
+        database.close()
+        return
+      }
+      settled = true
+      window.clearTimeout(timeout)
+      resolve(database)
+    }).catch(fail)
+  })
+}
+
 const getDatabase = () => {
   if (!('indexedDB' in window)) {
     return Promise.reject(new Error('Este navegador no permite guardar proyectos localmente.'))
   }
-  databasePromise ??= openDB<FreeCutDatabase>(DATABASE_NAME, DATABASE_VERSION, {
-    upgrade(database) {
-      if (!database.objectStoreNames.contains('projects')) {
-        database.createObjectStore('projects')
-      }
-      if (!database.objectStoreNames.contains('assets')) {
-        database.createObjectStore('assets', { keyPath: 'id' })
-      }
-      if (!database.objectStoreNames.contains('ownership')) {
-        database.createObjectStore('ownership')
-      }
-    },
-    blocked() {
-      databasePromise = undefined
-    },
-    blocking() {
-      databasePromise = undefined
-    },
-  }).catch((error: unknown) => {
+  databasePromise ??= openDatabase().catch((error: unknown) => {
     databasePromise = undefined
     throw error
   })
