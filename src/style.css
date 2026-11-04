@@ -92,7 +92,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .preview-aspect-ratio { padding: 5px 8px; border: 1px solid #34353e; border-radius: 4px; background: #1c1d24; color: #aaaab7; font-size: 9px; }
 .preview-stage { min-height: 200px; flex: 1; display: grid; place-items: center; padding: 24px 28px 8px; overflow: hidden; }
 .video-frame { position: relative; width: min(100%, 720px); max-width: 100%; max-height: 100%; aspect-ratio: 16 / 9; display: grid; place-items: center; overflow: hidden; border-radius: 5px; background: #090a0d; box-shadow: 0 9px 35px #0005; }
-.video-frame video { width: 100%; height: 100%; object-fit: cover; }
+.video-frame video { width: 100%; height: 100%; object-fit: contain; }
 .video-overlay { position: absolute; inset: auto 5% 8%; display: flex; flex-direction: column; align-items: center; gap: 7px; color: white; text-align: center; text-shadow: 0 2px 6px #000; pointer-events: none; }
 .video-overlay strong { font: 700 clamp(15px, 2vw, 27px) 'Manrope', sans-serif; }
 .video-overlay span { max-width: 90%; padding: 0; border-radius: 0; background: transparent; font-size: clamp(10px, 1.2vw, 14px); line-height: 1.2; white-space: pre-wrap; }

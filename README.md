@@ -117,7 +117,7 @@ Basic Auth restringe el acceso a la aplicación, pero no crea cuentas dentro de 
 - Recortar inicio y final por clip.
 - Añadir un título y subtítulos manuales.
 - Generar subtítulos con transcripción local en el servidor, editar texto y tiempos de cada segmento y elegir estilos Limpio, Contorno, Recuadro rosa, Itálica, Palabra clave, Condensado, Serif o Minimal. El estilo seleccionado se guarda con el proyecto y se incluye en la exportación.
-- Elegir formatos de video Original, 9:16, 16:9, 1:1, 4:3, 3:4, 3:2, 2:1, 2.35:1, 1.85:1 o 128:27. El encuadre se centra automáticamente y el formato se conserva en el proyecto, la copia de seguridad y la exportación.
+- Elegir formatos de video Original, 9:16, 16:9, 1:1, 4:3, 3:4, 3:2, 2:1, 2.35:1, 1.85:1 o 128:27. El video completo conserva sus proporciones dentro del lienzo, con bandas si hace falta; el formato se conserva en el proyecto, la copia de seguridad y la exportación.
 - Aplicar filtros básicos.
 - Exportar el clip seleccionado como WebM, incluyendo el audio original cuando el navegador lo permite.
 - Guardar automáticamente el proyecto y sus archivos en IndexedDB, en el navegador y dispositivo actuales.

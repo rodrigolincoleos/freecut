@@ -60,11 +60,11 @@ function getExportDimensions(width: number, height: number, ratio: VideoAspectRa
   if (ratio === 'original' || !width || !height) return { width: width || 1280, height: height || 720 }
   const aspect = getAspectRatioValue(ratio, width, height)
   const sourceAspect = width / height
-  const outputWidth = sourceAspect > aspect ? Math.round(height * aspect) : width
-  const outputHeight = sourceAspect > aspect ? height : Math.round(width / aspect)
+  const outputWidth = sourceAspect > aspect ? width : Math.ceil(height * aspect)
+  const outputHeight = sourceAspect > aspect ? Math.ceil(width / aspect) : height
   return {
-    width: Math.max(2, outputWidth - outputWidth % 2),
-    height: Math.max(2, outputHeight - outputHeight % 2),
+    width: Math.max(2, outputWidth + outputWidth % 2),
+    height: Math.max(2, outputHeight + outputHeight % 2),
   }
 }
 
@@ -73,24 +73,17 @@ function drawVideoFrame(
   video: HTMLVideoElement,
   width: number,
   height: number,
-  ratio: VideoAspectRatio,
 ) {
   const sourceWidth = video.videoWidth
   const sourceHeight = video.videoHeight
-  const targetRatio = width / height
-  const sourceRatio = sourceWidth / sourceHeight
-  if (ratio === 'original' || Math.abs(targetRatio - sourceRatio) < 0.001) {
-    context.drawImage(video, 0, 0, width, height)
-    return
-  }
-
-  if (sourceRatio > targetRatio) {
-    const cropWidth = sourceHeight * targetRatio
-    context.drawImage(video, (sourceWidth - cropWidth) / 2, 0, cropWidth, sourceHeight, 0, 0, width, height)
-  } else {
-    const cropHeight = sourceWidth / targetRatio
-    context.drawImage(video, 0, (sourceHeight - cropHeight) / 2, sourceWidth, cropHeight, 0, 0, width, height)
-  }
+  const scale = Math.min(width / sourceWidth, height / sourceHeight)
+  const displayWidth = sourceWidth * scale
+  const displayHeight = sourceHeight * scale
+  const x = (width - displayWidth) / 2
+  const y = (height - displayHeight) / 2
+  context.fillStyle = '#000'
+  context.fillRect(0, 0, width, height)
+  context.drawImage(video, x, y, displayWidth, displayHeight)
 }
 
 function drawCaption(
@@ -778,7 +771,7 @@ function App() {
         return
       }
       context.filter = filter.css
-      drawVideoFrame(context, video, canvas.width, canvas.height, aspectRatio)
+      drawVideoFrame(context, video, canvas.width, canvas.height)
       context.filter = 'none'
       if (overlayText.trim()) {
         const fontSize = Math.max(24, Math.round(canvas.width * 0.045))
