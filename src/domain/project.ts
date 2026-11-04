@@ -19,8 +19,10 @@ export type CaptionSegment = {
   text: string
 }
 
+export type CaptionStyle = 'classic' | 'outline' | 'pink' | 'italic' | 'yellow' | 'impact' | 'serif' | 'minimal'
+
 export type ProjectSnapshot = {
-  schemaVersion: 2
+  schemaVersion: 3
   id: 'default'
   name: string
   updatedAt: number
@@ -28,6 +30,7 @@ export type ProjectSnapshot = {
   activeId: string
   overlayText: string
   captionSegments: CaptionSegment[]
+  captionStyle: CaptionStyle
   filterName: string
 }
 
@@ -117,19 +120,30 @@ function isCaptionSegment(value: unknown, media: ProjectMedia[]): value is Capti
   )
 }
 
+function isCaptionStyle(value: unknown): value is CaptionStyle {
+  return value === 'classic' ||
+    value === 'outline' ||
+    value === 'pink' ||
+    value === 'italic' ||
+    value === 'yellow' ||
+    value === 'impact' ||
+    value === 'serif' ||
+    value === 'minimal'
+}
+
+function isCaptionSegments(value: unknown, media: ProjectMedia[]): value is CaptionSegment[] {
+  return Array.isArray(value) &&
+    value.length <= 5000 &&
+    value.every((item) => isCaptionSegment(item, media)) &&
+    new Set(value.map((caption) => caption.id)).size === value.length
+}
+
 export function validateProjectSnapshot(value: unknown): value is ProjectSnapshot {
   if (!value || typeof value !== 'object') return false
   const project = value as Record<string, unknown>
-  if (!isValidProjectBase(project, 2)) return false
+  if (!isValidProjectBase(project, 3)) return false
   const media = project.media as ProjectMedia[]
-  const captions = project.captionSegments
-  if (!Array.isArray(captions) || captions.length > 5000 || !captions.every((item) => isCaptionSegment(item, media))) {
-    return false
-  }
-  const captionIds = captions.map((caption) => caption.id)
-  return (
-    new Set(captionIds).size === captions.length
-  )
+  return isCaptionSegments(project.captionSegments, media) && isCaptionStyle(project.captionStyle)
 }
 
 export function normalizeProjectSnapshot(value: unknown): ProjectSnapshot {
@@ -139,37 +153,46 @@ export function normalizeProjectSnapshot(value: unknown): ProjectSnapshot {
   }
 
   const legacy = value as Record<string, unknown>
+  let captionSegments: CaptionSegment[]
   if (
-    legacy.schemaVersion !== 1 ||
-    !isValidProjectBase(legacy, 1) ||
-    typeof legacy.captionText !== 'string'
+    legacy.schemaVersion === 1 &&
+    isValidProjectBase(legacy, 1) &&
+    typeof legacy.captionText === 'string'
   ) {
+    const media = legacy.media as ProjectMedia[]
+    const activeVideo = media.find((item) => item.id === legacy.activeId && item.kind === 'video')
+      ?? media.find((item) => item.kind === 'video')
+    const captionText = legacy.captionText.trim()
+    const captionEnd = activeVideo?.trimEnd || activeVideo?.duration || 0
+    captionSegments = captionText && activeVideo && captionEnd > activeVideo.trimStart
+      ? [{
+          id: `legacy-${activeVideo.id}`,
+          mediaId: activeVideo.id,
+          start: activeVideo.trimStart,
+          end: captionEnd,
+          text: captionText,
+        }]
+      : []
+  } else if (
+    legacy.schemaVersion === 2 &&
+    isValidProjectBase(legacy, 2) &&
+    isCaptionSegments(legacy.captionSegments, legacy.media as ProjectMedia[])
+  ) {
+    captionSegments = legacy.captionSegments
+  } else {
     throw new Error('El proyecto guardado tiene un formato no compatible.')
   }
 
-  const media = legacy.media as ProjectMedia[]
-  const activeVideo = media.find((item) => item.id === legacy.activeId && item.kind === 'video')
-    ?? media.find((item) => item.kind === 'video')
-  const captionText = legacy.captionText.trim()
-  const captionEnd = activeVideo?.trimEnd || activeVideo?.duration || 0
-  const captionSegments: CaptionSegment[] = captionText && activeVideo && captionEnd > activeVideo.trimStart
-    ? [{
-        id: `legacy-${activeVideo.id}`,
-        mediaId: activeVideo.id,
-        start: activeVideo.trimStart,
-        end: captionEnd,
-        text: captionText,
-      }]
-    : []
   const snapshot: ProjectSnapshot = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: 'default',
     name: legacy.name as string,
     updatedAt: legacy.updatedAt as number,
-    media,
+    media: legacy.media as ProjectMedia[],
     activeId: legacy.activeId as string,
     overlayText: legacy.overlayText as string,
     captionSegments,
+    captionStyle: isCaptionStyle(legacy.captionStyle) ? legacy.captionStyle : 'classic',
     filterName: legacy.filterName as string,
   }
   if (!validateProjectSnapshot(snapshot)) {

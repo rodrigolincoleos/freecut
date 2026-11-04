@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { indexedDbProjectRepository } from './data/indexedDbProjectRepository'
 import { createProjectBackup, readProjectBackup } from './domain/projectBackup'
-import type { CaptionSegment, ProjectAsset, ProjectMedia, ProjectSnapshot } from './domain/project'
+import type { CaptionSegment, CaptionStyle, ProjectAsset, ProjectMedia, ProjectSnapshot } from './domain/project'
 import { downloadBlob } from './utils/download'
 
 type MediaItem = ProjectMedia & {
@@ -27,6 +27,116 @@ const filters = [
   { name: 'Contraste', css: 'contrast(1.2) saturate(1.1)' },
 ]
 
+const captionStyles: { id: CaptionStyle; name: string; sample: string }[] = [
+  { id: 'classic', name: 'Limpio', sample: 'The quick brown fox' },
+  { id: 'outline', name: 'Contorno', sample: 'El veloz zorro' },
+  { id: 'pink', name: 'Recuadro rosa', sample: 'THE QUICK' },
+  { id: 'italic', name: 'Itálica', sample: 'brown fox' },
+  { id: 'yellow', name: 'Palabra clave', sample: 'THE QUICK FOX' },
+  { id: 'impact', name: 'Condensado', sample: 'THE QUICK' },
+  { id: 'serif', name: 'Serif', sample: 'zorro' },
+  { id: 'minimal', name: 'Minimal', sample: 'THE QUICK BROWN FOX' },
+]
+
+function drawCaption(
+  context: CanvasRenderingContext2D,
+  text: string,
+  style: CaptionStyle,
+  width: number,
+  height: number,
+) {
+  const fontSize = Math.max(16, Math.round(width * 0.027))
+  const uppercase = style === 'impact' || style === 'yellow' || style === 'minimal'
+  const captionText = uppercase ? text.toLocaleUpperCase() : text
+  const italic = style === 'italic'
+  const fontFamily = style === 'serif' ? 'Georgia, serif' : 'system-ui, sans-serif'
+  const condensed = style === 'impact' || style === 'yellow'
+  const fontWeight = style === 'classic' || style === 'minimal' ? 500 : italic || style === 'serif' ? 700 : 800
+  const fontStyle = italic ? 'italic ' : ''
+  const resolvedFontFamily = condensed ? 'Impact, "Arial Narrow", sans-serif' : fontFamily
+  context.font = `${fontStyle}${fontWeight} ${fontSize}px ${resolvedFontFamily}`
+  context.textAlign = 'center'
+  context.textBaseline = 'middle'
+  context.lineJoin = 'round'
+
+  const maxWidth = width * 0.9
+  const lines: string[][] = []
+  for (const paragraph of captionText.split(/\r?\n/)) {
+    let line: string[] = []
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+      const candidate = [...line, word]
+      if (line.length && context.measureText(candidate.join(' ')).width > maxWidth) {
+        lines.push(line)
+        line = [word]
+      } else {
+        line = candidate
+      }
+    }
+    if (line) lines.push(line)
+  }
+  if (!lines.length) return
+
+  const lineHeight = fontSize * 1.2
+  const paddingX = style === 'pink' ? fontSize * 0.45 : 0
+  const paddingY = style === 'pink' ? fontSize * 0.24 : 0
+  const bottom = height * 0.97
+  const lastWordIndex = lines.flat().length - 1
+  let wordIndex = 0
+  lines.forEach((line, index) => {
+    const y = bottom - (lines.length - index - 0.5) * lineHeight
+    const lineText = line.join(' ')
+    const measuredWidth = Math.min(context.measureText(lineText).width, maxWidth)
+    const startX = width / 2 - measuredWidth / 2
+    context.shadowColor = 'rgba(0,0,0,.8)'
+    context.shadowBlur = style === 'classic' || style === 'italic' || style === 'serif' ? fontSize * 0.2 : 0
+    context.shadowOffsetY = style === 'classic' || style === 'italic' || style === 'serif' ? fontSize * 0.07 : 0
+    if (style === 'pink') {
+      const boxWidth = measuredWidth + paddingX * 2
+      const boxHeight = lineHeight + paddingY * 2
+      const left = width / 2 - boxWidth / 2
+      const top = y - boxHeight / 2
+      context.fillStyle = '#f2a9c5'
+      context.shadowBlur = 0
+      context.shadowOffsetY = 0
+      context.beginPath()
+      context.roundRect(left, top, boxWidth, boxHeight, fontSize * 0.18)
+      context.fill()
+    }
+    context.lineWidth = style === 'classic' || style === 'minimal' || style === 'pink'
+      ? 0
+      : Math.max(2, fontSize * (style === 'impact' || style === 'yellow' ? 0.1 : 0.08))
+    context.strokeStyle = style === 'serif' ? 'rgba(35,25,18,.9)' : 'rgba(0,0,0,.9)'
+    let x = startX
+    line.forEach((word, wordPosition) => {
+      if (wordPosition > 0) x += context.measureText(' ').width
+      const wordWidth = context.measureText(word).width
+      context.fillStyle = style === 'pink'
+        ? '#17151a'
+        : style === 'yellow' && wordIndex === lastWordIndex
+          ? '#ffe44d'
+          : style === 'serif'
+            ? '#fff1db'
+            : '#fff'
+      if (context.lineWidth) context.strokeText(word, x + wordWidth / 2, y)
+      context.fillText(word, x + wordWidth / 2, y)
+      x += wordWidth
+      wordIndex += 1
+    })
+  })
+}
+
+function getCaptionParts(text: string, style: CaptionStyle) {
+  const value = style === 'yellow' || style === 'impact' || style === 'minimal'
+    ? text.toLocaleUpperCase()
+    : text
+  const parts = value.split(/(\s+)/)
+  let lastWord = -1
+  for (let index = 0; index < parts.length; index += 1) {
+    if (/\S/.test(parts[index])) lastWord = index
+  }
+  return parts.map((part, index) => ({ text: part, highlighted: style === 'yellow' && index === lastWord }))
+}
+
 function App() {
   const [media, setMedia] = useState<MediaItem[]>([])
   const [activeId, setActiveId] = useState('')
@@ -42,6 +152,7 @@ function App() {
   const [trimEnd, setTrimEnd] = useState(0)
   const [overlayText, setOverlayText] = useState('')
   const [captionSegments, setCaptionSegments] = useState<CaptionSegment[]>([])
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyle>('classic')
   const [transcriptionLanguage, setTranscriptionLanguage] = useState('es')
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [filter, setFilter] = useState(filters[0])
@@ -101,6 +212,7 @@ function App() {
         setTrimEnd(restoredMedia.find((item) => item.id === saved.snapshot.activeId)?.trimEnd ?? 0)
         setOverlayText(saved.snapshot.overlayText)
         setCaptionSegments(saved.snapshot.captionSegments)
+        setCaptionStyle(saved.snapshot.captionStyle)
         setFilter(filters.find((item) => item.name === saved.snapshot.filterName) ?? filters[0])
       }
       setStorageAvailable(true)
@@ -147,7 +259,7 @@ function App() {
   useEffect(() => {
     if (!isReady || !storageAvailable) return
     const snapshot: ProjectSnapshot = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id: 'default',
       name: projectName.trim() || 'Proyecto sin título',
       updatedAt: Date.now(),
@@ -155,6 +267,7 @@ function App() {
       activeId: activeVideo?.id ?? '',
       overlayText,
       captionSegments,
+      captionStyle,
       filterName: filter.name,
     }
     const assets = media.map((item) => ({ id: item.id, blob: item.file }))
@@ -174,7 +287,7 @@ function App() {
       })
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [isReady, storageAvailable, projectName, media, activeVideo?.id, overlayText, captionSegments, filter.name])
+  }, [isReady, storageAvailable, projectName, media, activeVideo?.id, overlayText, captionSegments, captionStyle, filter.name])
 
   useEffect(() => {
     mediaRef.current = media
@@ -603,15 +716,7 @@ function App() {
         video.currentTime < caption.end,
       )
       if (frameCaption?.text.trim()) {
-        const fontSize = Math.max(16, Math.round(canvas.width * 0.027))
-        context.font = `600 ${fontSize}px system-ui, sans-serif`
-        context.textAlign = 'center'
-        context.textBaseline = 'bottom'
-        context.lineWidth = Math.max(3, fontSize * 0.16)
-        context.strokeStyle = 'rgba(0,0,0,.8)'
-        context.fillStyle = '#fff'
-        context.strokeText(frameCaption.text, canvas.width / 2, canvas.height * 0.97, canvas.width * 0.9)
-        context.fillText(frameCaption.text, canvas.width / 2, canvas.height * 0.97, canvas.width * 0.9)
+        drawCaption(context, frameCaption.text, captionStyle, canvas.width, canvas.height)
       }
       requestAnimationFrame(drawFrame)
     }
@@ -638,7 +743,7 @@ function App() {
 
   const exportBackup = () => {
     const snapshot: ProjectSnapshot = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id: 'default',
       name: projectName.trim() || 'Proyecto sin título',
       updatedAt: Date.now(),
@@ -646,6 +751,7 @@ function App() {
       activeId: activeVideo?.id ?? '',
       overlayText,
       captionSegments,
+      captionStyle,
       filterName: filter.name,
     }
     const assets: ProjectAsset[] = media.map((item) => ({ id: item.id, blob: item.file }))
@@ -707,6 +813,7 @@ function App() {
       setTrimEnd(selected?.trimEnd ?? 0)
       setOverlayText(snapshot.overlayText)
       setCaptionSegments(snapshot.captionSegments)
+      setCaptionStyle(snapshot.captionStyle)
       setFilter(filters.find((item) => item.name === snapshot.filterName) ?? filters[0])
       setActivePanel('media')
       setIsPlaying(false)
@@ -944,6 +1051,21 @@ function App() {
           {activePanel === 'captions' && (
             <div className="settings-content">
               <p className="panel-description">Genera subtítulos para el clip seleccionado y corrige el texto o sus tiempos.</p>
+              <span className="field-label">Estilo de subtítulos</span>
+              <div className="caption-style-grid">
+                {captionStyles.map((style) => (
+                  <button
+                    className={`caption-style-option ${captionStyle === style.id ? 'selected' : ''}`}
+                    key={style.id}
+                    type="button"
+                    aria-pressed={captionStyle === style.id}
+                    onClick={() => setCaptionStyle(style.id)}
+                  >
+                    <span className={`caption-style-sample caption-style-${style.id}`}>{style.sample}</span>
+                    <span>{style.name}</span>
+                  </button>
+                ))}
+              </div>
               <label className="field-label" htmlFor="transcriptionLanguage">Idioma hablado</label>
               <select
                 id="transcriptionLanguage"
@@ -1055,7 +1177,13 @@ function App() {
                 {(overlayText || previewCaption?.text) && (
                   <div className="video-overlay">
                     {overlayText && <strong>{overlayText}</strong>}
-                    {previewCaption?.text && <span>{previewCaption.text}</span>}
+                    {previewCaption?.text && (
+                      <span className={`caption-style-${captionStyle}`}>
+                        {getCaptionParts(previewCaption.text, captionStyle).map((part, index) => (
+                          <b className={part.highlighted ? 'caption-highlight' : undefined} key={index}>{part.text}</b>
+                        ))}
+                      </span>
+                    )}
                   </div>
                 )}
               </div>

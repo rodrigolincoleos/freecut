@@ -116,7 +116,7 @@ Basic Auth restringe el acceso a la aplicación, pero no crea cuentas dentro de 
 - Ordenar clips de video arrastrándolos en la línea de tiempo.
 - Recortar inicio y final por clip.
 - Añadir un título y subtítulos manuales.
-- Generar subtítulos con transcripción local en el servidor, editar texto y tiempos de cada segmento.
+- Generar subtítulos con transcripción local en el servidor, editar texto y tiempos de cada segmento y elegir estilos Limpio, Contorno, Recuadro rosa, Itálica, Palabra clave, Condensado, Serif o Minimal. El estilo seleccionado se guarda con el proyecto y se incluye en la exportación.
 - Aplicar filtros básicos.
 - Exportar el clip seleccionado como WebM, incluyendo el audio original cuando el navegador lo permite.
 - Guardar automáticamente el proyecto y sus archivos en IndexedDB, en el navegador y dispositivo actuales.
