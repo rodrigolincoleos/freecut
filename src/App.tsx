@@ -9,7 +9,7 @@ type MediaItem = ProjectMedia & {
   file: File
   url: string
 }
-type Panel = 'media' | 'text' | 'audio' | 'effects' | 'captions'
+type Panel = 'media' | 'text' | 'audio' | 'effects' | 'captions' | 'aspect'
 type SaveStatus = 'loading' | 'saved' | 'saving' | 'error'
 
 const formatTime = (seconds: number) => {
@@ -209,7 +209,6 @@ function App() {
   const [captionSegments, setCaptionSegments] = useState<CaptionSegment[]>([])
   const [captionStyle, setCaptionStyle] = useState<CaptionStyle>('classic')
   const [aspectRatio, setAspectRatio] = useState<VideoAspectRatio>('original')
-  const [isAspectMenuOpen, setIsAspectMenuOpen] = useState(false)
   const [transcriptionLanguage, setTranscriptionLanguage] = useState('es')
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [filter, setFilter] = useState(filters[0])
@@ -984,6 +983,7 @@ function App() {
             ['audio', '♫', 'Audio'],
             ['effects', '✦', 'Efectos'],
             ['captions', '▤', 'Subtítulos'],
+            ['aspect', '▣', 'Relación de aspecto'],
           ] as [Panel, string, string][]).map(([panel, icon, label]) => (
             <button
               key={panel}
@@ -1007,6 +1007,7 @@ function App() {
                 audio: 'Audio',
                 effects: 'Efectos',
                 captions: 'Subtítulos',
+                aspect: 'Relación de aspecto',
                 media: 'Tus medios',
               }[activePanel])}</h1>
             </div>
@@ -1234,41 +1235,37 @@ function App() {
               )}
             </div>
           )}
+
+          {activePanel === 'aspect' && (
+            <div className="settings-content">
+              <p className="panel-description">Elige el formato del lienzo. El encuadre se adapta en la vista previa y en la exportación.</p>
+              <div className="aspect-ratio-grid" role="group" aria-label="Formatos de video">
+                {aspectRatios.map((option) => (
+                  <button
+                    className={`aspect-ratio-option ${aspectRatio === option.id ? 'selected' : ''}`}
+                    key={option.id}
+                    type="button"
+                    aria-pressed={aspectRatio === option.id}
+                    onClick={() => setAspectRatio(option.id)}
+                  >
+                    <span
+                      className="aspect-ratio-icon"
+                      style={{
+                        aspectRatio: option.value ? String(option.value) : String(previewAspectRatio),
+                      }}
+                    />
+                    <span>{option.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </aside>
 
         <section className="editor-area">
           <div className="preview-toolbar">
             <div className="preview-label"><span className="live-dot" /> VISTA PREVIA <span className="divider">/</span> {activeVideo?.file.name ?? 'Sin clip seleccionado'}</div>
-            <div className="ratio-control">
-              <button
-                className="ratio-button"
-                type="button"
-                aria-haspopup="true"
-                aria-expanded={isAspectMenuOpen}
-                onClick={() => setIsAspectMenuOpen((open) => !open)}
-              >
-                {aspectRatios.find((item) => item.id === aspectRatio)?.name ?? 'Original'} <span>⌄</span>
-              </button>
-              {isAspectMenuOpen && (
-                <div className="ratio-menu" role="group" aria-label="Formato del video">
-                  {aspectRatios.map((option) => (
-                    <button
-                      className={`ratio-option ${aspectRatio === option.id ? 'selected' : ''}`}
-                      key={option.id}
-                      type="button"
-                      aria-pressed={aspectRatio === option.id}
-                      onClick={() => {
-                        setAspectRatio(option.id)
-                        setIsAspectMenuOpen(false)
-                      }}
-                    >
-                      <span className="ratio-option-icon" style={{ aspectRatio: option.value ? String(option.value) : String(previewAspectRatio) }} />
-                      <span>{option.name}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <span className="preview-aspect-ratio">{aspectRatios.find((item) => item.id === aspectRatio)?.name ?? 'Original'}</span>
           </div>
 
           <div className="preview-stage" ref={previewStageRef}>
