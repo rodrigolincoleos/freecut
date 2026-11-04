@@ -24,6 +24,13 @@ if [ "$(id -u)" -eq 0 ]; then
   exit 1
 fi
 
+for variable in VITE_AUTH0_DOMAIN VITE_AUTH0_CLIENT_ID VITE_AUTH0_AUDIENCE; do
+  if [ -z "${!variable:-}" ]; then
+    printf 'Required Auth0 build configuration is missing: %s\n' "$variable" >&2
+    exit 1
+  fi
+done
+
 mkdir -p "$base/releases"
 workdir="$(mktemp -d)"
 release_tmp=""

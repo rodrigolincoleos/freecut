@@ -11,8 +11,11 @@ Editor de video en español, construido con React, TypeScript y Vite. La interfa
 
 ```sh
 npm install
+cp .env.example .env.local
 npm run dev
 ```
+
+Edita `.env.local` con la configuración pública de la SPA antes de iniciar. El archivo está excluido de Git.
 
 ## Aplicaciones móviles
 
@@ -31,84 +34,49 @@ npm run ios
 
 La PWA funciona en navegadores compatibles bajo HTTPS (o localhost). El service worker almacena el shell y los recursos estáticos; no guarda los videos en caché de red.
 
-## Beta en Nginx
+## Auth0 y despliegue web
 
-FreeCut se publica en `freecut.cincodadosrojos3d.cl`; Nginx sirve el frontend estático y reenvía `/api/` al servicio local de transcripción. No hace falta mantener un proceso Node.js en producción; el script de despliegue usa Node para compilar. El ejemplo de Nginx está en [`deploy/nginx-freecut.conf.example`](./deploy/nginx-freecut.conf.example) y usa un webroot separado (`/home/sodro/freecut`), sin cambiar el sitio principal. Ajusta las rutas del certificado a las que realmente use tu servidor.
+FreeCut usa Auth0 Universal Login para la web y protege el endpoint de transcripción con access tokens validados en FastAPI. No hay servidor Express ni base de datos de usuarios/proyectos. Configura los valores públicos de la SPA en `.env.local` (usa `.env.example` como referencia); nunca agregues Client Secrets ni tokens al frontend o al repositorio:
 
-El beta está protegido con HTTP Basic Auth de Nginx. Crea el archivo de contraseñas fuera del webroot, por ejemplo con `htpasswd -B -c /etc/nginx/.htpasswd-freecut usuario-beta`, y limita sus permisos al usuario/grupo de Nginx. En Debian/Ubuntu, `htpasswd` se instala con `apache2-utils`; en otras distribuciones el paquete suele llamarse `httpd-tools`. Nunca guardes credenciales en este repositorio.
+```dotenv
+VITE_AUTH0_DOMAIN=tu-tenant.us.auth0.com
+VITE_AUTH0_CLIENT_ID=client-id-de-la-spa
+VITE_AUTH0_AUDIENCE=api-identifier-de-freecut
+```
 
-El servidor Linux descarga el código directamente desde GitHub, compila la aplicación y publica una release. No hace falta GitHub Actions, un runner self-hosted, exponer SSH a Internet ni guardar llaves de despliegue en GitHub.
+En Auth0 Dashboard:
 
-Configuración inicial:
+1. Crea una aplicación **Single Page Application** con Authorization Code + PKCE. Allowed Callback URLs y Allowed Logout URLs deben incluir `https://freecut.cincodadosrojos3d.cl/`; Allowed Web Origins debe incluir `https://freecut.cincodadosrojos3d.cl` sin barra final. Para desarrollo local agrega temporalmente `http://localhost:5173/` en callbacks/logout y `http://localhost:5173` en Web Origins.
+2. Crea una API propia con identificador `https://api.freecut.cincodadosrojos3d.cl` (es un audience y **no** el endpoint público de servidor ni el Management API). Usa RS256 y define el scope `transcribe:run`. La API comprueba ese scope y los claims firmados de rol/correo en el servidor. No habilites RBAC de permisos hasta definir cómo asignar automáticamente el rol Auth0 `USER` a nuevos usuarios; no concedas `ADMIN` desde el signup. CORS adicional no hace falta mientras el navegador y `/api/` sean same-origin.
+3. En Universal Login habilita la conexión de usuarios elegida, signup, recuperación de contraseña, envío/verificación de correo y, si se requiere, MFA. El Post Login Action fuente está en [`auth0/actions/freecut-post-login.js`](./auth0/actions/freecut-post-login.js): agrégalo al Login flow. Bloquea usuarios sin correo verificado, emite los claims de rol con namespace y asigna el rol Auth0 `ADMIN` solo desde el Dashboard a cuentas autorizadas. El resto recibe el claim `USER`.
 
-1. Confirma que el servidor tiene Git, Node.js 22.12 o posterior, npm y conexión saliente HTTPS a `github.com`. El repositorio es público, así que no se requiere token para clonarlo.
-2. Desde una sesión SSH en el servidor, clona el repositorio a una carpeta de trabajo separada del webroot:
+El tenant entregado para esta integración tiene prefijo `dev-`; úsalo para desarrollo/staging. Antes de producción confirma un tenant productivo y configura en él la SPA, la API, el Action y los callbacks del dominio final; actualiza el dominio de Auth0 tanto en el frontend como en systemd.
 
-   ```sh
-   git clone --branch main https://github.com/rodrigolincoleos/freecut.git /home/sodro/freecut-source
-   ```
+La app no muestra herramientas ni carga proyectos hasta que Auth0 resuelve una sesión autenticada. El SDK mantiene los tokens en memoria. El backend valida firma/JWKS, issuer, audience y expiración; requiere correo verificado, rol `USER` o `ADMIN` y scope `transcribe:run`. La falta de token válido devuelve 401 y la falta de permiso 403. `/health` solo informa disponibilidad técnica y no expone datos de usuario.
 
-3. Como `sodro`, ejecuta el script desde esa copia para publicar el frontend:
+El proyecto anterior guardado con la clave local `default` queda sin asignar. La primera cuenta puede importarlo explícitamente; la operación registra una única cuenta propietaria en ese navegador y conserva intacta la copia original. Cada cuenta tiene un espacio local distinto basado en el `sub` Auth0. Esto no sincroniza proyectos entre dispositivos ni reemplaza una autorización de servidor para proyectos en nube. Aún no existen endpoints ni panel de administración; los claims ADMIN son una base para futuras funciones, no crean APIs administrativas.
 
-   ```sh
-   bash /home/sodro/freecut-source/deploy/deploy-from-github.sh
-   ```
+El frontend sigue siendo estático: Nginx sirve los recursos y reenvía `/api/` a FastAPI en `127.0.0.1:8765`. El ejemplo completo está en [`deploy/nginx-freecut.conf.example`](./deploy/nginx-freecut.conf.example). Retira el `auth_basic` compartido del virtual host FreeCut: además de duplicar el login, su header Basic es incompatible con el `Authorization: Bearer` de la API. Nginx debe reenviar `Authorization` al servicio y no cachear `/api/`. Revisa el archivo real del host, prueba `sudo nginx -t` y recarga solo en la ventana de despliegue aprobada.
 
-4. Instala el servicio privado de transcripción. Este instala sus dependencias Python en un entorno virtual dedicado, crea un servicio systemd local y descarga el modelo de voz público desde Hugging Face cuando se use por primera vez:
-
-   ```sh
-   sudo bash /home/sodro/freecut-source/deploy/install-transcription-service.sh
-   ```
-
-   El servicio usa `faster-whisper` con el modelo multilingüe `small` en CPU INT8, limitado a 4 hilos y una transcripción simultánea. PyAV se mantiene en una versión compatible con el decodificador de audio de `faster-whisper`. El modelo y las dependencias ocupan espacio y la primera transcripción demora más mientras el modelo se descarga. Si se agota la memoria o afecta el rendimiento del servidor, detén el servicio con `sudo systemctl stop freecut-transcription`.
-
-5. En el bloque HTTPS existente de `/etc/nginx/sites-available/freecut-beta`, agrega este `location` **dentro del `server { ... }` HTTPS**, conservando Basic Auth ya definido en ese servidor:
-
-   ```nginx
-   location /api/ {
-       client_max_body_size 520m;
-       client_body_timeout 600s;
-       proxy_request_buffering off;
-       proxy_connect_timeout 30s;
-       proxy_send_timeout 1800s;
-       proxy_read_timeout 1800s;
-       proxy_set_header Host $host;
-       proxy_set_header X-Real-IP $remote_addr;
-       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-       proxy_pass http://127.0.0.1:8765/;
-   }
-   ```
-
-   El ejemplo completo está en [`deploy/nginx-freecut.conf.example`](./deploy/nginx-freecut.conf.example). El endpoint no se expone directamente a la red: Uvicorn escucha solo en `127.0.0.1`, y Nginx conserva la autenticación básica. Valida y recarga:
-
-   ```sh
-   sudo nginx -t && sudo systemctl reload nginx
-   curl http://127.0.0.1:8765/health
-   ```
-
-6. Como el webroot está bajo `/home/sodro`, el usuario de los workers de Nginx necesita permiso de recorrido en `/home/sodro` y acceso de lectura a las releases. Identifica el usuario con la directiva `user` de `/etc/nginx/nginx.conf` (o revisando los procesos worker), y configura ACL solo para ese usuario. No hagas el directorio personal globalmente legible. Crea también un archivo de contraseñas de Basic Auth fuera del webroot; nunca guardes credenciales en este repositorio.
-
-El límite de subida es 512 MB y se procesa una transcripción a la vez para proteger los recursos del servidor. Para generar subtítulos se sube el archivo de video completo a tu propio servidor; el temporal se elimina al terminar tanto en éxito como en error. El modelo solo lee el audio del video y no se llama a un proveedor de transcripción externo. El modelo de voz sí se descarga desde Hugging Face; es un modelo público, no contiene el audio de los testers. Para cada despliegue, actualiza el frontend con `git -C /home/sodro/freecut-source pull --ff-only` y ejecuta el script de despliegue. Si cambian las dependencias o el código del backend, ejecuta además `sudo bash /home/sodro/freecut-source/deploy/install-transcription-service.sh`.
-
-La transcripción está habilitada en la beta web. Los shells nativos no tienen todavía configurado el acceso autenticado al servicio y muestran la función deshabilitada.
-
-Para cada despliegue, actualiza la copia de trabajo y vuelve a ejecutar el script:
+El servicio procesa una transcripción a la vez, limita cada carga a 512 MB y elimina los temporales también en caso de error. Instala o actualiza su entorno y configuración systemd después de actualizar el código:
 
 ```sh
+sudo bash /home/sodro/freecut-source/deploy/install-transcription-service.sh
+```
+
+El servidor necesita Git, Node.js 22.12 o posterior, npm, HTTPS saliente a GitHub y HTTPS saliente al dominio Auth0 para descargar JWKS. El script de despliegue aborta si faltan las variables públicas de build. Como `sodro`, configúralas en el entorno de la sesión antes de cada publicación:
+
+```sh
+export VITE_AUTH0_DOMAIN='tu-tenant.us.auth0.com'
+export VITE_AUTH0_CLIENT_ID='client-id-de-la-spa'
+export VITE_AUTH0_AUDIENCE='api-identifier-de-freecut'
 git -C /home/sodro/freecut-source pull --ff-only
 bash /home/sodro/freecut-source/deploy/deploy-from-github.sh
 ```
 
-Cada ejecución clona y compila `main` limpio, crea una carpeta de release bajo `/home/sodro/freecut/releases` y cambia el enlace `current` al terminar. No modifica el directorio del sitio principal ni deja una actualización parcial servida. Conserva las releases anteriores para rollback.
+Cada ejecución compila `main`, crea una release bajo `/home/sodro/freecut/releases` y cambia `current` de forma atómica; conserva releases anteriores para rollback. El servicio systemd configura el issuer y audience de la API. Si se cambia el tenant o el API Identifier, actualiza también `deploy/freecut-transcription.service` y vuelve a instalar el servicio.
 
-Para revertir una publicación, sustituye `<release-anterior>` por el nombre de una carpeta existente bajo `releases` y ejecuta:
-
-```sh
-ln -s /home/sodro/freecut/releases/<release-anterior> /home/sodro/freecut/.current.rollback
-mv -Tf /home/sodro/freecut/.current.rollback /home/sodro/freecut/current
-```
-
-Basic Auth restringe el acceso a la aplicación, pero no crea cuentas dentro de FreeCut. Los proyectos y medios se almacenan localmente en el navegador de cada tester; no se suben al servidor ni se sincronizan entre dispositivos. Como en otras PWA, un dispositivo que ya inició sesión puede conservar recursos en caché para uso offline; quitarle acceso al servidor no borra esa caché local.
+La PWA funciona en navegadores compatibles bajo HTTPS (o localhost) y cachea el shell estático. El contenido privado y la API siguen dependiendo de la sesión/token; cerrar sesión no borra las copias locales del navegador. Los shells nativos de Capacitor requieren callbacks/deep links y un flujo de navegador del sistema antes de habilitar Auth0 en Android/iOS; esta integración inicial cubre la web.
 
 ## Funciones disponibles
 

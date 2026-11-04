@@ -61,8 +61,11 @@ export type LoadedProject = {
 }
 
 export interface ProjectRepository {
-  load(): Promise<LoadedProject | null>
-  save(snapshot: ProjectSnapshot, assets: ProjectAsset[], replaceAssets?: boolean): Promise<void>
+  load(ownerId: string): Promise<LoadedProject | null>
+  save(ownerId: string, snapshot: ProjectSnapshot, assets: ProjectAsset[], replaceAssets?: boolean): Promise<void>
+  getLegacyProjectState(ownerId: string): Promise<'available' | 'owned' | 'claimed' | 'dismissed' | 'none'>
+  claimLegacyProject(ownerId: string): Promise<LoadedProject>
+  dismissLegacyProject(ownerId: string): Promise<void>
 }
 
 function isProjectMedia(value: unknown, requireTransform = true, requireClipEffects = true): value is ProjectMedia {

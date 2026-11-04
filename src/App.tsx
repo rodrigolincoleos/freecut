@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { useAuth0 } from '@auth0/auth0-react'
 import { Capacitor } from '@capacitor/core'
 import { indexedDbProjectRepository } from './data/indexedDbProjectRepository'
 import { createProjectBackup, readProjectBackup } from './domain/projectBackup'
-import type { CaptionSegment, CaptionStyle, ProjectAsset, ProjectMedia, ProjectSnapshot, VideoAspectRatio } from './domain/project'
+import type { CaptionSegment, CaptionStyle, LoadedProject, ProjectAsset, ProjectMedia, ProjectSnapshot, VideoAspectRatio } from './domain/project'
 import { downloadBlob } from './utils/download'
 
 type MediaItem = ProjectMedia & {
@@ -11,6 +12,7 @@ type MediaItem = ProjectMedia & {
 }
 type Panel = 'media' | 'text' | 'audio' | 'effects' | 'captions' | 'aspect'
 type SaveStatus = 'loading' | 'saved' | 'saving' | 'error'
+type LegacyProjectState = 'checking' | 'available' | 'owned' | 'claimed' | 'dismissed' | 'none'
 type TransformHandle = 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se'
 type ClipTransform = Pick<ProjectMedia, 'rotation' | 'flipHorizontal' | 'flipVertical' | 'scaleX' | 'scaleY' | 'offsetX' | 'offsetY'>
 type TransformResize = {
@@ -267,6 +269,7 @@ function getCaptionParts(text: string, style: CaptionStyle) {
 }
 
 function App() {
+  const { getAccessTokenSilently, logout, user } = useAuth0()
   const [media, setMedia] = useState<MediaItem[]>([])
   const [activeId, setActiveId] = useState('')
   const [projectName, setProjectName] = useState('Proyecto sin título')
@@ -285,6 +288,7 @@ function App() {
   const [aspectRatio, setAspectRatio] = useState<VideoAspectRatio>('original')
   const [transcriptionLanguage, setTranscriptionLanguage] = useState('es')
   const [isTranscribing, setIsTranscribing] = useState(false)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [filter, setFilter] = useState(filters[0])
   const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 })
   const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 })
@@ -294,6 +298,8 @@ function App() {
   const [dragId, setDragId] = useState('')
   const [isBladeToolActive, setIsBladeToolActive] = useState(false)
   const [isTransformSelected, setIsTransformSelected] = useState(false)
+  const [legacyProjectState, setLegacyProjectState] = useState<LegacyProjectState>('checking')
+  const ownerId = user?.sub
   const videoRef = useRef<HTMLVideoElement>(null)
   const previewStageRef = useRef<HTMLDivElement>(null)
   const timelineTrackRef = useRef<HTMLDivElement>(null)
@@ -382,32 +388,48 @@ function App() {
     return () => observer.disconnect()
   }, [])
 
+  const applyLoadedProject = (saved: LoadedProject) => {
+    const restoredMedia = saved.snapshot.media.map((item) => {
+      const asset = saved.assets.find((entry) => entry.id === item.id)
+      if (!asset) throw new Error(`No se encontró el archivo "${item.name}".`)
+      const file = new File([asset.blob], item.name, {
+        type: item.type,
+        lastModified: item.lastModified,
+      })
+      return { ...item, file, url: URL.createObjectURL(file) }
+    })
+    mediaRef.current = restoredMedia
+    setMedia(restoredMedia)
+    setProjectName(saved.snapshot.name)
+    activeIdRef.current = saved.snapshot.activeId
+    setActiveId(saved.snapshot.activeId)
+    setTrimStart(restoredMedia.find((item) => item.id === saved.snapshot.activeId)?.trimStart ?? 0)
+    setTrimEnd(restoredMedia.find((item) => item.id === saved.snapshot.activeId)?.trimEnd ?? 0)
+    setOverlayText(saved.snapshot.overlayText)
+    setCaptionSegments(saved.snapshot.captionSegments)
+    setCaptionStyle(saved.snapshot.captionStyle)
+    setAspectRatio(saved.snapshot.aspectRatio)
+    setFilter(filters.find((item) => item.name === saved.snapshot.filterName) ?? filters[0])
+  }
+
   useEffect(() => {
     let cancelled = false
-    indexedDbProjectRepository.load().then((saved) => {
-      if (cancelled) return
-      if (saved) {
-        const restoredMedia = saved.snapshot.media.map((item) => {
-          const asset = saved.assets.find((entry) => entry.id === item.id)
-          if (!asset) throw new Error(`No se encontró el archivo "${item.name}".`)
-          const file = new File([asset.blob], item.name, {
-            type: item.type,
-            lastModified: item.lastModified,
-          })
-          return { ...item, file, url: URL.createObjectURL(file) }
-        })
-        setMedia(restoredMedia)
-        setProjectName(saved.snapshot.name)
-        activeIdRef.current = saved.snapshot.activeId
-        setActiveId(saved.snapshot.activeId)
-        setTrimStart(restoredMedia.find((item) => item.id === saved.snapshot.activeId)?.trimStart ?? 0)
-        setTrimEnd(restoredMedia.find((item) => item.id === saved.snapshot.activeId)?.trimEnd ?? 0)
-        setOverlayText(saved.snapshot.overlayText)
-        setCaptionSegments(saved.snapshot.captionSegments)
-        setCaptionStyle(saved.snapshot.captionStyle)
-        setAspectRatio(saved.snapshot.aspectRatio)
-        setFilter(filters.find((item) => item.name === saved.snapshot.filterName) ?? filters[0])
+    if (!ownerId) {
+      setStorageAvailable(false)
+      setSaveStatus('error')
+      setNotice('No se pudo determinar tu identidad Auth0 para abrir el proyecto.')
+      setLegacyProjectState('none')
+      setIsReady(true)
+      return () => {
+        cancelled = true
       }
+    }
+    indexedDbProjectRepository.load(ownerId).then(async (saved) => {
+      if (cancelled) return
+      if (saved) applyLoadedProject(saved)
+      const legacyState = saved ? 'none' : await indexedDbProjectRepository.getLegacyProjectState(ownerId)
+      if (cancelled) return
+      setLegacyProjectState(legacyState)
       setStorageAvailable(true)
       setSaveStatus('saved')
       setIsReady(true)
@@ -421,7 +443,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [ownerId])
 
   useEffect(() => {
     if (!import.meta.env.PROD || Capacitor.isNativePlatform() || !('serviceWorker' in navigator)) return
@@ -461,7 +483,8 @@ function App() {
   }, [activeVideo?.speed, activeVideo?.reverse, activeVideo?.volume, activeVideo?.audioFadeIn, activeVideo?.audioFadeOut])
 
   useEffect(() => {
-    if (!isReady || !storageAvailable) return
+    if (!isReady || !storageAvailable || !ownerId || legacyProjectState === 'checking'
+      || legacyProjectState === 'available' || legacyProjectState === 'owned') return
     const snapshot: ProjectSnapshot = {
       schemaVersion: 6,
       id: 'default',
@@ -481,7 +504,7 @@ function App() {
     const timer = window.setTimeout(() => {
       const save = saveQueueRef.current
         .catch(() => undefined)
-        .then(() => indexedDbProjectRepository.save(snapshot, assets))
+        .then(() => indexedDbProjectRepository.save(ownerId, snapshot, assets))
       saveQueueRef.current = save
       save.then(() => {
         if (version === saveVersionRef.current) setSaveStatus('saved')
@@ -492,7 +515,7 @@ function App() {
       })
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [isReady, storageAvailable, projectName, media, activeVideo?.id, overlayText, captionSegments, captionStyle, aspectRatio, filter.name])
+  }, [isReady, storageAvailable, ownerId, legacyProjectState, projectName, media, activeVideo?.id, overlayText, captionSegments, captionStyle, aspectRatio, filter.name])
 
   useEffect(() => {
     mediaRef.current = media
@@ -1025,9 +1048,15 @@ function App() {
       const formData = new FormData()
       formData.append('file', video.file, video.file.name)
       formData.append('language', transcriptionLanguage)
+      const accessToken = await getAccessTokenSilently({
+        authorizationParams: {
+          audience: import.meta.env.VITE_AUTH0_AUDIENCE,
+          scope: 'transcribe:run',
+        },
+      })
       const response = await fetch('/api/transcribe', {
         method: 'POST',
-        headers: { 'X-FreeCut-Request': 'transcribe' },
+        headers: { Authorization: `Bearer ${accessToken}` },
         body: formData,
       })
       let payload: unknown
@@ -1335,6 +1364,10 @@ function App() {
   }
 
   const restoreBackup = async (file: File) => {
+    if (!ownerId) {
+      setNotice('No se pudo determinar tu identidad para restaurar el proyecto.')
+      return
+    }
     let restored
     try {
       restored = await readProjectBackup(file)
@@ -1361,7 +1394,7 @@ function App() {
     try {
       const save = saveQueueRef.current
         .catch(() => undefined)
-        .then(() => indexedDbProjectRepository.save(snapshot, restored.assets, true))
+        .then(() => indexedDbProjectRepository.save(ownerId, snapshot, restored.assets, true))
       saveQueueRef.current = save
       await save
       videoRef.current?.pause()
@@ -1389,6 +1422,43 @@ function App() {
       setNotice(error instanceof Error ? `No se pudo restaurar la copia: ${error.message}` : 'No se pudo restaurar la copia.')
     } finally {
       if (version === saveVersionRef.current) setIsRestoringBackup(false)
+    }
+  }
+
+  const importLegacyProject = async () => {
+    if (!ownerId) {
+      setNotice('No se pudo determinar tu identidad para importar el proyecto local.')
+      return
+    }
+    try {
+      const saved = await indexedDbProjectRepository.claimLegacyProject(ownerId)
+      applyLoadedProject(saved)
+      setLegacyProjectState('claimed')
+      setStorageAvailable(true)
+      setSaveStatus('saved')
+      setNotice('Proyecto local importado a esta cuenta. Se conservó una copia sin asignar.')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'No se pudo importar el proyecto local.')
+    }
+  }
+
+  const dismissLegacyProject = async () => {
+    if (!ownerId) return
+    try {
+      await indexedDbProjectRepository.dismissLegacyProject(ownerId)
+      setLegacyProjectState('dismissed')
+    } catch (error) {
+      setNotice(error instanceof Error ? `No se pudo guardar la decisión: ${error.message}` : 'No se pudo guardar la decisión.')
+    }
+  }
+
+  const signOut = async () => {
+    setIsLoggingOut(true)
+    try {
+      await logout({ logoutParams: { returnTo: `${window.location.origin}/` } })
+    } catch (error) {
+      setIsLoggingOut(false)
+      setNotice(error instanceof Error ? `No se pudo cerrar la sesión: ${error.message}` : 'No se pudo cerrar la sesión.')
     }
   }
 
@@ -1432,6 +1502,10 @@ function App() {
           </span>
         </div>
         <div className="top-actions">
+          <span className="account-label" title={user?.email}>{user?.name || user?.email || 'Cuenta'}</span>
+          <button className="logout-button" type="button" onClick={() => void signOut()} disabled={isLoggingOut || saveStatus === 'saving' || isRestoringBackup}>
+            {isLoggingOut ? 'Cerrando…' : 'Cerrar sesión'}
+          </button>
           <button className="backup-button" onClick={exportBackup}>
             ↓ Copia
           </button>
@@ -2086,6 +2160,26 @@ function App() {
           <div className="inspector-footer"><span className="keyboard-icon">⌘</span><span>Atajos de teclado</span><span className="footer-arrow">↗</span></div>
         </aside>
       </div>
+      {(legacyProjectState === 'available' || legacyProjectState === 'owned') && (
+        <div className="legacy-project-backdrop">
+          <section className="legacy-project-dialog" role="dialog" aria-modal="true" aria-labelledby="legacy-project-title">
+            <span className="eyebrow">PROYECTO LOCAL</span>
+            <h2 id="legacy-project-title">Encontramos un proyecto anterior</h2>
+            <p>
+              Este proyecto se guardó antes de iniciar sesión y aún no está asociado a una cuenta.
+              Puedes importarlo a esta cuenta o continuar con un proyecto nuevo. El original se conservará en este dispositivo.
+            </p>
+            <div className="legacy-project-actions">
+              <button type="button" className="auth-submit" onClick={() => void importLegacyProject()}>
+                Importar a mi cuenta
+              </button>
+              <button type="button" className="legacy-dismiss" onClick={() => void dismissLegacyProject()}>
+                Continuar sin importar
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {notice && <div role="status" className="toast">{notice}</div>}
     </main>
   )

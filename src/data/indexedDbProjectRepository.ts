@@ -9,8 +9,9 @@ import type {
 import { normalizeProjectSnapshot } from '../domain/project'
 
 const DATABASE_NAME = 'freecut-projects'
-const DATABASE_VERSION = 1
-const CURRENT_PROJECT_ID = 'default'
+const DATABASE_VERSION = 2
+const LEGACY_PROJECT_ID = 'default'
+const LEGACY_OWNER_KEY = 'legacy-project-owner'
 
 interface FreeCutDatabase extends DBSchema {
   projects: {
@@ -20,6 +21,10 @@ interface FreeCutDatabase extends DBSchema {
   assets: {
     key: string
     value: ProjectAsset
+  }
+  ownership: {
+    key: string
+    value: string | boolean
   }
 }
 
@@ -37,6 +42,9 @@ const getDatabase = () => {
       if (!database.objectStoreNames.contains('assets')) {
         database.createObjectStore('assets', { keyPath: 'id' })
       }
+      if (!database.objectStoreNames.contains('ownership')) {
+        database.createObjectStore('ownership')
+      }
     },
     blocked() {
       databasePromise = undefined
@@ -51,31 +59,35 @@ const getDatabase = () => {
   return databasePromise
 }
 
+const projectKey = (ownerId: string) => `user:${ownerId}`
+const assetKey = (ownerId: string, assetId: string) => `${projectKey(ownerId)}:${assetId}`
+const legacyDismissedKey = (ownerId: string) => `legacy-dismissed:${ownerId}`
+
+async function loadProject(database: IDBPDatabase<FreeCutDatabase>, key: string, assetIdFor: (id: string) => string) {
+  const transaction = database.transaction(['projects', 'assets'], 'readonly')
+  const snapshot = await transaction.objectStore('projects').get(key)
+  if (!snapshot) {
+    await transaction.done
+    return null
+  }
+  const normalizedSnapshot = normalizeProjectSnapshot(snapshot)
+  const assets = await Promise.all(normalizedSnapshot.media.map(async (media) => {
+    const stored = await transaction.objectStore('assets').get(assetIdFor(media.id))
+    if (!stored) throw new Error(`No se encontró el archivo guardado "${media.name}".`)
+    return { id: media.id, blob: stored.blob }
+  }))
+  await transaction.done
+  return { snapshot: normalizedSnapshot, assets }
+}
+
 export const indexedDbProjectRepository: ProjectRepository = {
-  async load(): Promise<LoadedProject | null> {
+  async load(ownerId: string): Promise<LoadedProject | null> {
     const database = await getDatabase()
-    const transaction = database.transaction(['projects', 'assets'], 'readonly')
-    const [storedSnapshot, allAssets] = await Promise.all([
-      transaction.objectStore('projects').get(CURRENT_PROJECT_ID),
-      transaction.objectStore('assets').getAll(),
-      transaction.done,
-    ]).then(([project, assets]) => [project, assets] as const)
-
-    if (storedSnapshot === undefined) return null
-    const snapshot = normalizeProjectSnapshot(storedSnapshot)
-
-    const assetsById = new Map(allAssets.map((asset) => [asset.id, asset]))
-    const assets = snapshot.media.map((media) => {
-      const asset = assetsById.get(media.id)
-      if (!asset) {
-        throw new Error(`No se encontró el archivo guardado "${media.name}".`)
-      }
-      return asset
-    })
-    return { snapshot, assets }
+    return loadProject(database, projectKey(ownerId), (id) => assetKey(ownerId, id))
   },
 
   async save(
+    ownerId: string,
     snapshot: ProjectSnapshot,
     assets: ProjectAsset[],
     replaceAssets = false,
@@ -83,26 +95,91 @@ export const indexedDbProjectRepository: ProjectRepository = {
     const database = await getDatabase()
     const transaction = database.transaction(['projects', 'assets'], 'readwrite')
     const assetStore = transaction.objectStore('assets')
+    const key = projectKey(ownerId)
+    const storedAssets = assets.map((asset) => ({
+      id: assetKey(ownerId, asset.id),
+      blob: asset.blob,
+    }))
     if (replaceAssets) {
-      await assetStore.clear()
+      const existingKeys = await assetStore.getAllKeys()
+      await Promise.all(existingKeys
+        .filter((assetId): assetId is string => typeof assetId === 'string' && assetId.startsWith(`${key}:`))
+        .map((assetId) => assetStore.delete(assetId)))
       await Promise.all([
-        transaction.objectStore('projects').put(snapshot, CURRENT_PROJECT_ID),
-        ...assets.map((asset) => assetStore.put(asset)),
+        transaction.objectStore('projects').put(snapshot, key),
+        ...storedAssets.map((asset) => assetStore.put(asset)),
       ])
     } else {
-      const nextIds = new Set(assets.map((asset) => asset.id))
-      const existingKeys = await assetStore.getAllKeys()
-      const existingIds = new Set(existingKeys.filter((key): key is string => typeof key === 'string'))
+      const nextIds = new Set(storedAssets.map((asset) => asset.id))
+      const existingKeys = (await assetStore.getAllKeys())
+        .filter((assetId): assetId is string => typeof assetId === 'string' && assetId.startsWith(`${key}:`))
+      const existingIds = new Set(existingKeys)
       await Promise.all([
-        transaction.objectStore('projects').put(snapshot, CURRENT_PROJECT_ID),
-        ...assets
+        transaction.objectStore('projects').put(snapshot, key),
+        ...storedAssets
           .filter((asset) => !existingIds.has(asset.id))
           .map((asset) => assetStore.put(asset)),
         ...existingKeys
-          .filter((key) => typeof key === 'string' && !nextIds.has(key))
-          .map((key) => assetStore.delete(key)),
+          .filter((assetId) => !nextIds.has(assetId))
+          .map((assetId) => assetStore.delete(assetId)),
       ])
     }
     await transaction.done
+  },
+
+  async getLegacyProjectState(ownerId: string) {
+    const database = await getDatabase()
+    const transaction = database.transaction(['projects', 'ownership'], 'readonly')
+    const [snapshot, owner, dismissed] = await Promise.all([
+      transaction.objectStore('projects').get(LEGACY_PROJECT_ID),
+      transaction.objectStore('ownership').get(LEGACY_OWNER_KEY),
+      transaction.objectStore('ownership').get(legacyDismissedKey(ownerId)),
+      transaction.done,
+    ]).then(([project, legacyOwner, wasDismissed]) => [project, legacyOwner, wasDismissed] as const)
+    if (!snapshot) return 'none'
+    if (owner === ownerId) return 'owned'
+    if (owner) return 'claimed'
+    return dismissed ? 'dismissed' : 'available'
+  },
+
+  async claimLegacyProject(ownerId: string) {
+    const database = await getDatabase()
+    const transaction = database.transaction(['projects', 'assets', 'ownership'], 'readwrite')
+    const projects = transaction.objectStore('projects')
+    const ownership = transaction.objectStore('ownership')
+    const [legacySnapshot, owner, existingProject] = await Promise.all([
+      projects.get(LEGACY_PROJECT_ID),
+      ownership.get(LEGACY_OWNER_KEY),
+      projects.get(projectKey(ownerId)),
+    ])
+    if (!legacySnapshot) {
+      throw new Error('No hay un proyecto local anterior para importar.')
+    }
+    if (owner && owner !== ownerId) {
+      throw new Error('El proyecto local anterior ya fue asignado a otra cuenta.')
+    }
+    if (existingProject && owner !== ownerId) {
+      throw new Error('Esta cuenta ya tiene un proyecto y no puede reemplazarse con la importación.')
+    }
+
+    const snapshot = normalizeProjectSnapshot(legacySnapshot)
+    const sourceAssets = await Promise.all(snapshot.media.map(async (media) => {
+      const stored = await transaction.objectStore('assets').get(media.id)
+      if (!stored) throw new Error(`No se encontró el archivo guardado "${media.name}".`)
+      return { id: assetKey(ownerId, media.id), blob: stored.blob }
+    }))
+    await Promise.all([
+      projects.put(snapshot, projectKey(ownerId)),
+      ownership.put(ownerId, LEGACY_OWNER_KEY),
+      ownership.delete(legacyDismissedKey(ownerId)),
+      ...sourceAssets.map((asset) => transaction.objectStore('assets').put(asset)),
+    ])
+    await transaction.done
+    return { snapshot, assets: sourceAssets.map((asset, index) => ({ id: snapshot.media[index].id, blob: asset.blob })) }
+  },
+
+  async dismissLegacyProject(ownerId: string) {
+    const database = await getDatabase()
+    await database.put('ownership', true, legacyDismissedKey(ownerId))
   },
 }

@@ -12,6 +12,9 @@ Environment=PYTHONUNBUFFERED=1
 Environment=HF_HOME=/home/sodro/.cache/freecut-models
 Environment=HF_HUB_DISABLE_TELEMETRY=1
 Environment=DO_NOT_TRACK=1
+Environment=AUTH0_DOMAIN=dev-8vujygzythn1kgpv.us.auth0.com
+Environment=AUTH0_AUDIENCE=https://api.freecut.cincodadosrojos3d.cl
+Environment=AUTH0_REQUIRED_SCOPE=transcribe:run
 Environment=WHISPER_MODEL=small
 Environment=WHISPER_CPU_THREADS=4
 Environment=OMP_NUM_THREADS=4

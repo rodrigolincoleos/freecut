@@ -7,8 +7,12 @@ import threading
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import jwt
 from pydantic import BaseModel
+from jwt import PyJWKClient
+from jwt.exceptions import InvalidTokenError, PyJWKClientConnectionError, PyJWKClientError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("freecut.transcription")
@@ -17,8 +21,15 @@ MAX_UPLOAD_BYTES = int(os.environ.get("FREECUT_MAX_UPLOAD_BYTES", 512 * 1024 * 1
 MAX_SEGMENTS = 5000
 MODEL_NAME = os.environ.get("WHISPER_MODEL", "small")
 CPU_THREADS = int(os.environ.get("WHISPER_CPU_THREADS", "4"))
+AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "").strip()
+AUTH0_AUDIENCE = os.environ.get("AUTH0_AUDIENCE", "").strip()
+AUTH0_ISSUER = f"https://{AUTH0_DOMAIN}/" if AUTH0_DOMAIN else ""
+AUTH0_REQUIRED_SCOPE = os.environ.get("AUTH0_REQUIRED_SCOPE", "transcribe:run").strip()
+AUTH0_CLAIMS_NAMESPACE = "https://freecut.cincodadosrojos3d.cl/"
+AUTH0_JWKS_CLIENT = PyJWKClient(f"https://{AUTH0_DOMAIN}/.well-known/jwks.json") if AUTH0_DOMAIN else None
 
 app = FastAPI(title="FreeCut Transcription", docs_url=None, redoc_url=None, openapi_url=None)
+bearer_scheme = HTTPBearer(auto_error=False)
 transcription_lock = asyncio.Semaphore(1)
 model_lock = threading.Lock()
 model = None
@@ -37,6 +48,63 @@ class TranscriptionResult(BaseModel):
 
 class ModelInitializationError(Exception):
     pass
+
+
+def verify_access_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> dict:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Se requiere un access token Bearer válido.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not AUTH0_DOMAIN or not AUTH0_AUDIENCE or AUTH0_JWKS_CLIENT is None:
+        logger.error("Auth0 API validation is not configured.")
+        raise HTTPException(status_code=503, detail="La autenticación de la API no está configurada.")
+
+    try:
+        signing_key = AUTH0_JWKS_CLIENT.get_signing_key_from_jwt(credentials.credentials)
+        claims = jwt.decode(
+            credentials.credentials,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=AUTH0_AUDIENCE,
+            issuer=AUTH0_ISSUER,
+            options={"require": ["exp", "iss", "aud", "sub"]},
+        )
+    except PyJWKClientConnectionError as error:
+        logger.error("Could not retrieve Auth0 signing keys: %s", error)
+        raise HTTPException(status_code=503, detail="No se pudo validar la sesión con Auth0.") from error
+    except (InvalidTokenError, PyJWKClientError, ValueError):
+        raise HTTPException(
+            status_code=401,
+            detail="El access token no es válido o expiró.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+
+    if not isinstance(claims.get("sub"), str) or not claims["sub"]:
+        raise HTTPException(
+            status_code=401,
+            detail="El access token no contiene una identidad válida.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return claims
+
+
+def require_transcription_permission(claims: dict = Depends(verify_access_token)) -> dict:
+    if claims.get(f"{AUTH0_CLAIMS_NAMESPACE}email_verified") is not True:
+        raise HTTPException(status_code=403, detail="Debes verificar tu correo electrónico para transcribir.")
+    roles = claims.get(f"{AUTH0_CLAIMS_NAMESPACE}roles", [])
+    if not isinstance(roles, list) or not any(role in roles for role in ("USER", "ADMIN")):
+        raise HTTPException(status_code=403, detail="Tu cuenta no tiene acceso a FreeCut.")
+    scopes = set(claims.get("scope", "").split()) if isinstance(claims.get("scope", ""), str) else set()
+    permissions = claims.get("permissions", [])
+    if not isinstance(permissions, list):
+        permissions = []
+    if AUTH0_REQUIRED_SCOPE not in scopes and AUTH0_REQUIRED_SCOPE not in permissions:
+        raise HTTPException(status_code=403, detail="No tienes permiso para transcribir videos.")
+    return claims
 
 
 def get_model():
@@ -85,6 +153,8 @@ def transcribe_file(path: str, language: str | None) -> TranscriptionResult:
 
 @app.get("/health")
 async def health():
+    if not AUTH0_DOMAIN or not AUTH0_AUDIENCE or AUTH0_JWKS_CLIENT is None:
+        raise HTTPException(status_code=503, detail="La autenticación de la API no está configurada.")
     return {"status": "ok"}
 
 
@@ -92,12 +162,10 @@ async def health():
 async def transcribe(
     file: UploadFile = File(...),
     language: Literal["es", "en", "auto"] = Form("es"),
-    x_freecut_request: str = Header(..., alias="X-FreeCut-Request"),
+    token_claims: dict = Depends(require_transcription_permission),
 ):
     temporary_path: str | None = None
     try:
-        if x_freecut_request != "transcribe":
-            raise HTTPException(status_code=403, detail="Solicitud no autorizada.")
         async with transcription_lock:
             suffix = Path(file.filename or "").suffix.lower()
             if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):

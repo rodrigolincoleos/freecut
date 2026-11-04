@@ -1,5 +1,6 @@
 fastapi>=0.115,<1
 faster-whisper>=1.1,<2
 av>=14,<19
+PyJWT[crypto]>=2.10,<3
 python-multipart>=0.0.20,<1
 uvicorn>=0.34,<1
