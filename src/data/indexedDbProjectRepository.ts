@@ -6,7 +6,7 @@ import type {
   ProjectRepository,
   ProjectSnapshot,
 } from '../domain/project'
-import { validateProjectSnapshot } from '../domain/project'
+import { normalizeProjectSnapshot } from '../domain/project'
 
 const DATABASE_NAME = 'freecut-projects'
 const DATABASE_VERSION = 1
@@ -55,16 +55,14 @@ export const indexedDbProjectRepository: ProjectRepository = {
   async load(): Promise<LoadedProject | null> {
     const database = await getDatabase()
     const transaction = database.transaction(['projects', 'assets'], 'readonly')
-    const [snapshot, allAssets] = await Promise.all([
+    const [storedSnapshot, allAssets] = await Promise.all([
       transaction.objectStore('projects').get(CURRENT_PROJECT_ID),
       transaction.objectStore('assets').getAll(),
       transaction.done,
     ]).then(([project, assets]) => [project, assets] as const)
 
-    if (snapshot === undefined) return null
-    if (!validateProjectSnapshot(snapshot)) {
-      throw new Error('El proyecto guardado tiene un formato no compatible.')
-    }
+    if (storedSnapshot === undefined) return null
+    const snapshot = normalizeProjectSnapshot(storedSnapshot)
 
     const assetsById = new Map(allAssets.map((asset) => [asset.id, asset]))
     const assets = snapshot.media.map((media) => {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { indexedDbProjectRepository } from './data/indexedDbProjectRepository'
 import { createProjectBackup, readProjectBackup } from './domain/projectBackup'
-import type { ProjectAsset, ProjectMedia, ProjectSnapshot } from './domain/project'
+import type { CaptionSegment, ProjectAsset, ProjectMedia, ProjectSnapshot } from './domain/project'
 import { downloadBlob } from './utils/download'
 
 type MediaItem = ProjectMedia & {
@@ -41,7 +41,9 @@ function App() {
   const [trimStart, setTrimStart] = useState(0)
   const [trimEnd, setTrimEnd] = useState(0)
   const [overlayText, setOverlayText] = useState('')
-  const [captionText, setCaptionText] = useState('')
+  const [captionSegments, setCaptionSegments] = useState<CaptionSegment[]>([])
+  const [transcriptionLanguage, setTranscriptionLanguage] = useState('es')
+  const [isTranscribing, setIsTranscribing] = useState(false)
   const [filter, setFilter] = useState(filters[0])
   const [isExporting, setIsExporting] = useState(false)
   const [pendingExport, setPendingExport] = useState<{ blob: Blob; filename: string } | null>(null)
@@ -61,6 +63,12 @@ function App() {
   const audioItems = media.filter((item) => item.kind === 'audio')
   const activeVideo = videos.find((item) => item.id === activeId) ?? videos[0]
   const activeAudio = audioItems[0]
+  const activeCaptions = captionSegments
+    .filter((caption) => caption.mediaId === activeVideo?.id)
+    .sort((a, b) => a.start - b.start)
+  const previewCaption = activeCaptions.find((caption) =>
+    currentTime >= caption.start && currentTime < caption.end,
+  )
   const activeClipIndex = activeVideo ? videos.findIndex((item) => item.id === activeVideo.id) : -1
   const timelineTime = activeClipIndex < 0 ? 0 : videos
     .slice(0, activeClipIndex)
@@ -92,7 +100,7 @@ function App() {
         setTrimStart(restoredMedia.find((item) => item.id === saved.snapshot.activeId)?.trimStart ?? 0)
         setTrimEnd(restoredMedia.find((item) => item.id === saved.snapshot.activeId)?.trimEnd ?? 0)
         setOverlayText(saved.snapshot.overlayText)
-        setCaptionText(saved.snapshot.captionText)
+        setCaptionSegments(saved.snapshot.captionSegments)
         setFilter(filters.find((item) => item.name === saved.snapshot.filterName) ?? filters[0])
       }
       setStorageAvailable(true)
@@ -139,14 +147,14 @@ function App() {
   useEffect(() => {
     if (!isReady || !storageAvailable) return
     const snapshot: ProjectSnapshot = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       id: 'default',
       name: projectName.trim() || 'Proyecto sin título',
       updatedAt: Date.now(),
       media: media.map(({ file: _file, url: _url, ...item }) => item),
       activeId: activeVideo?.id ?? '',
       overlayText,
-      captionText,
+      captionSegments,
       filterName: filter.name,
     }
     const assets = media.map((item) => ({ id: item.id, blob: item.file }))
@@ -166,7 +174,7 @@ function App() {
       })
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [isReady, storageAvailable, projectName, media, activeVideo?.id, overlayText, captionText, filter.name])
+  }, [isReady, storageAvailable, projectName, media, activeVideo?.id, overlayText, captionSegments, filter.name])
 
   useEffect(() => {
     mediaRef.current = media
@@ -290,6 +298,7 @@ function App() {
     if (!item) return
     URL.revokeObjectURL(item.url)
     setMedia((items) => items.filter((entry) => entry.id !== id))
+    setCaptionSegments((segments) => segments.filter((caption) => caption.mediaId !== id))
     if (id === activeId) {
       const next = videos.find((entry) => entry.id !== id)
       setActiveId(next?.id ?? '')
@@ -308,6 +317,135 @@ function App() {
       videoItems.splice(toIndex, 0, moved)
       return [...videoItems, ...otherItems]
     })
+  }
+
+  const updateCaption = (id: string, updates: Partial<Pick<CaptionSegment, 'start' | 'end' | 'text'>>) => {
+    const duration = activeVideo?.duration ?? 0
+    setCaptionSegments((segments) => segments.map((caption) => {
+      if (caption.id !== id) return caption
+      const start = updates.start === undefined
+        ? caption.start
+        : Math.max(0, Math.min(updates.start, caption.end - 0.01))
+      const end = updates.end === undefined
+        ? caption.end
+        : Math.min(duration, Math.max(updates.end, start + 0.01))
+      return {
+        ...caption,
+        ...updates,
+        start,
+        end,
+        text: updates.text === undefined ? caption.text : updates.text.slice(0, 2000),
+      }
+    }).sort((a, b) => a.start - b.start))
+  }
+
+  const addCaption = () => {
+    if (!activeVideo) return
+    if (captionSegments.length >= 5000) {
+      setNotice('El proyecto alcanzó el límite de 5000 segmentos de subtítulo.')
+      return
+    }
+    const duration = activeVideo.duration
+    const start = Math.min(Math.max(currentTime, 0), Math.max(0, duration - 0.1))
+    const end = Math.min(duration, start + 2)
+    if (end <= start) {
+      setNotice('El video necesita tener una duración válida para añadir subtítulos.')
+      return
+    }
+    setCaptionSegments((segments) => [
+      ...segments,
+      { id: crypto.randomUUID(), mediaId: activeVideo.id, start, end, text: '' },
+    ].sort((a, b) => a.start - b.start))
+  }
+
+  const transcribeVideo = async () => {
+    if (!activeVideo || isTranscribing) return
+    const video = activeVideo
+    if (video.file.size > 512 * 1024 * 1024) {
+      setNotice('El archivo supera el límite de 512 MB para transcripción.')
+      return
+    }
+    if (captionSegments.some((caption) => caption.mediaId === video.id)
+      && !window.confirm('La transcripción nueva reemplazará los subtítulos de este clip. ¿Continuar?')) {
+      return
+    }
+
+    setIsTranscribing(true)
+    setNotice('Enviando el clip al servidor para transcripción…')
+    try {
+      const formData = new FormData()
+      formData.append('file', video.file, video.file.name)
+      formData.append('language', transcriptionLanguage)
+      const response = await fetch('/api/transcribe', {
+        method: 'POST',
+        headers: { 'X-FreeCut-Request': 'transcribe' },
+        body: formData,
+      })
+      let payload: unknown
+      try {
+        payload = await response.json()
+      } catch {
+        throw new Error(response.ok
+          ? 'El servidor devolvió una respuesta inválida.'
+          : `El servicio de transcripción respondió con el error ${response.status}.`)
+      }
+      if (!response.ok) {
+        const detail = payload && typeof payload === 'object' && 'detail' in payload
+          && typeof payload.detail === 'string'
+          ? payload.detail
+          : `El servicio de transcripción respondió con el error ${response.status}.`
+        throw new Error(detail)
+      }
+      if (
+        !payload ||
+        typeof payload !== 'object' ||
+        !('segments' in payload) ||
+        !Array.isArray(payload.segments)
+      ) {
+        throw new Error('El servidor devolvió una transcripción con formato inválido.')
+      }
+      const generated = payload.segments.flatMap((item): CaptionSegment[] => {
+        if (!item || typeof item !== 'object') return []
+        const segment = item as { start?: unknown; end?: unknown; text?: unknown }
+        if (
+          typeof segment.start !== 'number' ||
+          !Number.isFinite(segment.start) ||
+          typeof segment.end !== 'number' ||
+          !Number.isFinite(segment.end) ||
+          segment.end <= segment.start ||
+          typeof segment.text !== 'string'
+        ) return []
+        const start = Math.max(0, Math.min(segment.start, video.duration))
+        const end = Math.max(start, Math.min(segment.end, video.duration))
+        if (end <= start || !segment.text.trim()) return []
+        return [{
+          id: crypto.randomUUID(),
+          mediaId: video.id,
+          start,
+          end,
+          text: segment.text.trim().slice(0, 2000),
+        }]
+      })
+      if (generated.length === 0) {
+        setNotice('No se detectó voz en el clip para crear subtítulos.')
+        return
+      }
+      if (!mediaRef.current.some((item) => item.id === video.id)) {
+        setNotice('El clip se quitó de la biblioteca antes de completar la transcripción.')
+        return
+      }
+      setCaptionSegments((segments) => [
+        ...segments.filter((caption) => caption.mediaId !== video.id),
+        ...generated,
+      ].sort((a, b) => a.start - b.start))
+      setNotice(`Se generaron ${generated.length} subtítulos. Puedes editarlos en la lista.`)
+    } catch (error) {
+      setNotice(error instanceof Error
+        ? `No se pudo transcribir el clip: ${error.message}`
+        : 'No se pudo transcribir el clip.')
+    } finally {
+      setIsTranscribing(false)
+    }
   }
 
   const saveBlobForUser = (
@@ -459,7 +597,12 @@ function App() {
         context.strokeText(overlayText, canvas.width / 2, canvas.height * 0.9)
         context.fillText(overlayText, canvas.width / 2, canvas.height * 0.9)
       }
-      if (captionText.trim()) {
+      const frameCaption = captionSegments.find((caption) =>
+        caption.mediaId === activeVideo.id &&
+        video.currentTime >= caption.start &&
+        video.currentTime < caption.end,
+      )
+      if (frameCaption?.text.trim()) {
         const fontSize = Math.max(16, Math.round(canvas.width * 0.027))
         context.font = `600 ${fontSize}px system-ui, sans-serif`
         context.textAlign = 'center'
@@ -467,8 +610,8 @@ function App() {
         context.lineWidth = Math.max(3, fontSize * 0.16)
         context.strokeStyle = 'rgba(0,0,0,.8)'
         context.fillStyle = '#fff'
-        context.strokeText(captionText, canvas.width / 2, canvas.height * 0.97)
-        context.fillText(captionText, canvas.width / 2, canvas.height * 0.97)
+        context.strokeText(frameCaption.text, canvas.width / 2, canvas.height * 0.97, canvas.width * 0.9)
+        context.fillText(frameCaption.text, canvas.width / 2, canvas.height * 0.97, canvas.width * 0.9)
       }
       requestAnimationFrame(drawFrame)
     }
@@ -495,14 +638,14 @@ function App() {
 
   const exportBackup = () => {
     const snapshot: ProjectSnapshot = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       id: 'default',
       name: projectName.trim() || 'Proyecto sin título',
       updatedAt: Date.now(),
       media: media.map(({ file: _file, url: _url, ...item }) => item),
       activeId: activeVideo?.id ?? '',
       overlayText,
-      captionText,
+      captionSegments,
       filterName: filter.name,
     }
     const assets: ProjectAsset[] = media.map((item) => ({ id: item.id, blob: item.file }))
@@ -563,7 +706,7 @@ function App() {
       setTrimStart(selected?.trimStart ?? 0)
       setTrimEnd(selected?.trimEnd ?? 0)
       setOverlayText(snapshot.overlayText)
-      setCaptionText(snapshot.captionText)
+      setCaptionSegments(snapshot.captionSegments)
       setFilter(filters.find((item) => item.name === snapshot.filterName) ?? filters[0])
       setActivePanel('media')
       setIsPlaying(false)
@@ -800,10 +943,89 @@ function App() {
 
           {activePanel === 'captions' && (
             <div className="settings-content">
-              <p className="panel-description">Añade una línea de subtítulo para mostrarla sobre el video.</p>
-              <label className="field-label" htmlFor="captionText">Subtítulo</label>
-              <textarea id="captionText" value={captionText} onChange={(event) => setCaptionText(event.target.value)} placeholder="Escribe un subtítulo…" rows={3} />
-              <div className="hint-card warning"><span>✦</span><p>La transcripción automática aún no está conectada. Esta versión permite añadir subtítulos manualmente.</p></div>
+              <p className="panel-description">Genera subtítulos para el clip seleccionado y corrige el texto o sus tiempos.</p>
+              <label className="field-label" htmlFor="transcriptionLanguage">Idioma hablado</label>
+              <select
+                id="transcriptionLanguage"
+                className="caption-language"
+                value={transcriptionLanguage}
+                onChange={(event) => setTranscriptionLanguage(event.target.value)}
+                disabled={isTranscribing}
+              >
+                <option value="es">Español</option>
+                <option value="en">Inglés</option>
+                <option value="auto">Detectar automáticamente</option>
+              </select>
+              <button
+                className="import-button caption-generate"
+                onClick={() => void transcribeVideo()}
+                disabled={!activeVideo || activeVideo.duration <= 0 || isTranscribing || Capacitor.isNativePlatform()}
+              >
+                {isTranscribing ? <><span className="spinner" /> Transcribiendo…</> : '✦ Generar subtítulos'}
+              </button>
+              {Capacitor.isNativePlatform() && <p className="caption-progress">La transcripción está disponible en la beta web; el shell nativo aún no tiene conexión autenticada al servicio.</p>}
+              {isTranscribing && <p className="caption-progress" role="status">El primer uso puede tardar mientras se carga el modelo. Mantén esta página abierta.</p>}
+              <div className="hint-card warning"><span>i</span><p>El video se envía al servidor FreeCut para transcribirlo. Se procesa allí y el archivo temporal se elimina al terminar; no se usa un proveedor externo. Límite: 512 MB.</p></div>
+              <div className="caption-list-heading">
+                <strong>Segmentos</strong>
+                <span>{activeCaptions.length}</span>
+              </div>
+              <button className="secondary-button caption-add" onClick={addCaption} disabled={!activeVideo || isTranscribing || captionSegments.length >= 5000}>
+                ＋ Añadir segmento manual
+              </button>
+              {activeCaptions.length === 0 ? (
+                <div className="empty-library compact"><span>▤</span><p>Aún no hay segmentos</p></div>
+              ) : (
+                <div className="caption-list">
+                  {activeCaptions.map((caption, index) => (
+                    <fieldset className="caption-segment" key={caption.id}>
+                      <legend>Segmento {index + 1}</legend>
+                      <label className="field-label" htmlFor={`caption-text-${caption.id}`}>Texto</label>
+                      <textarea
+                        id={`caption-text-${caption.id}`}
+                        value={caption.text}
+                        maxLength={2000}
+                        rows={2}
+                        onChange={(event) => updateCaption(caption.id, { text: event.target.value })}
+                      />
+                      <div className="caption-time-fields">
+                        <label>
+                          <span>Desde (s)</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max={activeVideo?.duration ?? 0}
+                            step="0.1"
+                            value={caption.start}
+                            onChange={(event) => updateCaption(caption.id, { start: Number(event.target.value) })}
+                          />
+                        </label>
+                        <label>
+                          <span>Hasta (s)</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max={activeVideo?.duration ?? 0}
+                            step="0.1"
+                            value={caption.end}
+                            onChange={(event) => updateCaption(caption.id, { end: Number(event.target.value) })}
+                          />
+                        </label>
+                      </div>
+                      <div className="caption-segment-actions">
+                        <button type="button" onClick={() => seek(caption.start)}>Ir al inicio</button>
+                        <button
+                          type="button"
+                          className="caption-delete"
+                          onClick={() => setCaptionSegments((segments) => segments.filter((item) => item.id !== caption.id))}
+                        >
+                          Eliminar
+                        </button>
+                      </div>
+                    </fieldset>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </aside>
@@ -830,10 +1052,10 @@ function App() {
                   style={{ filter: filter.css }}
                   playsInline
                 />
-                {(overlayText || captionText) && (
+                {(overlayText || previewCaption?.text) && (
                   <div className="video-overlay">
                     {overlayText && <strong>{overlayText}</strong>}
-                    {captionText && <span>{captionText}</span>}
+                    {previewCaption?.text && <span>{previewCaption.text}</span>}
                   </div>
                 )}
               </div>

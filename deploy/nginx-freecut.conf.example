@@ -31,6 +31,19 @@ server {
         add_header Cache-Control "no-cache";
     }
 
+    location /api/ {
+        client_max_body_size 520m;
+        client_body_timeout 600s;
+        proxy_request_buffering off;
+        proxy_connect_timeout 30s;
+        proxy_send_timeout 1800s;
+        proxy_read_timeout 1800s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_pass http://127.0.0.1:8765/;
+    }
+
     location /assets/ {
         try_files $uri =404;
         expires 1y;

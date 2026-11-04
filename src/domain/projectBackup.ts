@@ -1,4 +1,4 @@
-import { validateProjectSnapshot } from './project'
+import { normalizeProjectSnapshot, validateProjectSnapshot } from './project'
 import type { LoadedProject, ProjectAsset, ProjectSnapshot } from './project'
 
 const MAGIC = 'FCUTBK01'
@@ -70,20 +70,29 @@ export async function readProjectBackup(file: File): Promise<LoadedProject> {
   } catch {
     throw new Error('No se pudieron leer los datos del proyecto en la copia.')
   }
+  let snapshot: ProjectSnapshot
   if (
     !manifest ||
     manifest.format !== 'freecut-project-backup' ||
     manifest.version !== 1 ||
-    !validateProjectSnapshot(manifest.snapshot) ||
     !Array.isArray(manifest.assets) ||
-    manifest.assets.length !== manifest.snapshot.media.length
+    !manifest.snapshot ||
+    typeof manifest.snapshot !== 'object'
   ) {
+    throw new Error('La copia de FreeCut tiene una estructura no compatible.')
+  }
+  try {
+    snapshot = normalizeProjectSnapshot(manifest.snapshot)
+  } catch {
+    throw new Error('La copia de FreeCut tiene una estructura no compatible.')
+  }
+  if (manifest.assets.length !== snapshot.media.length) {
     throw new Error('La copia de FreeCut tiene una estructura no compatible.')
   }
 
   let expectedOffset = 0
   const assets = manifest.assets.map((entry, index) => {
-    const media = manifest.snapshot.media[index]
+    const media = snapshot.media[index]
     if (
       !entry ||
       entry.id !== media.id ||
@@ -110,5 +119,5 @@ export async function readProjectBackup(file: File): Promise<LoadedProject> {
   if (HEADER_SIZE + manifestSize + expectedOffset !== file.size) {
     throw new Error('La copia de FreeCut está incompleta o contiene datos sobrantes.')
   }
-  return { snapshot: manifest.snapshot, assets }
+  return { snapshot, assets }
 }
