@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import av
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
@@ -12,6 +13,9 @@ import main
 
 
 class TranscriptionTests(unittest.TestCase):
+    def test_pyav_version_keeps_faster_whisper_decode_compatibility(self):
+        self.assertLess(int(av.__version__.split(".")[0]), 19)
+
     def test_transcribe_file_maps_non_empty_segments(self):
         fake_model = SimpleNamespace(
             transcribe=lambda *_args, **_kwargs: (

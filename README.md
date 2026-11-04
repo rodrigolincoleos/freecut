@@ -60,7 +60,7 @@ Configuración inicial:
    sudo bash /home/sodro/freecut-source/deploy/install-transcription-service.sh
    ```
 
-   El servicio usa `faster-whisper` con el modelo multilingüe `small` en CPU INT8, limitado a 4 hilos y una transcripción simultánea. El modelo y las dependencias ocupan espacio y la primera transcripción demora más mientras el modelo se descarga. Si se agota la memoria o afecta el rendimiento del servidor, detén el servicio con `sudo systemctl stop freecut-transcription`.
+   El servicio usa `faster-whisper` con el modelo multilingüe `small` en CPU INT8, limitado a 4 hilos y una transcripción simultánea. PyAV se mantiene en una versión compatible con el decodificador de audio de `faster-whisper`. El modelo y las dependencias ocupan espacio y la primera transcripción demora más mientras el modelo se descarga. Si se agota la memoria o afecta el rendimiento del servidor, detén el servicio con `sudo systemctl stop freecut-transcription`.
 
 5. En el bloque HTTPS existente de `/etc/nginx/sites-available/freecut-beta`, agrega este `location` **dentro del `server { ... }` HTTPS**, conservando Basic Auth ya definido en ese servidor:
 
