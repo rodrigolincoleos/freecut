@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { indexedDbProjectRepository } from './data/indexedDbProjectRepository'
 import { createProjectBackup, readProjectBackup } from './domain/projectBackup'
@@ -11,6 +11,27 @@ type MediaItem = ProjectMedia & {
 }
 type Panel = 'media' | 'text' | 'audio' | 'effects' | 'captions' | 'aspect'
 type SaveStatus = 'loading' | 'saved' | 'saving' | 'error'
+type TransformHandle = 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se'
+type ClipTransform = Pick<ProjectMedia, 'rotation' | 'flipHorizontal' | 'flipVertical' | 'scaleX' | 'scaleY' | 'offsetX' | 'offsetY'>
+type TransformResize = {
+  pointerId: number
+  handle: TransformHandle
+  pointerX: number
+  pointerY: number
+  frameWidth: number
+  frameHeight: number
+  boundsWidth: number
+  boundsHeight: number
+  transform: ClipTransform
+}
+type TransformMove = {
+  pointerId: number
+  pointerX: number
+  pointerY: number
+  frameWidth: number
+  frameHeight: number
+  transform: ClipTransform
+}
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds)) return '00:00'
@@ -68,22 +89,82 @@ function getExportDimensions(width: number, height: number, ratio: VideoAspectRa
   }
 }
 
+function getBaseVideoSize(
+  frameWidth: number,
+  frameHeight: number,
+  sourceWidth: number,
+  sourceHeight: number,
+  rotation: number,
+) {
+  if (!frameWidth || !frameHeight || !sourceWidth || !sourceHeight) {
+    return { width: frameWidth, height: frameHeight }
+  }
+  const swapsDimensions = rotation === 90 || rotation === 270
+  const rotatedWidth = swapsDimensions ? sourceHeight : sourceWidth
+  const rotatedHeight = swapsDimensions ? sourceWidth : sourceHeight
+  const scale = Math.min(frameWidth / rotatedWidth, frameHeight / rotatedHeight)
+  return { width: sourceWidth * scale, height: sourceHeight * scale }
+}
+
+function getTransformedBounds(
+  frameWidth: number,
+  frameHeight: number,
+  sourceWidth: number,
+  sourceHeight: number,
+  transform: ClipTransform,
+) {
+  const base = getBaseVideoSize(frameWidth, frameHeight, sourceWidth, sourceHeight, transform.rotation)
+  const radians = transform.rotation * Math.PI / 180
+  const width = Math.abs(Math.cos(radians)) * base.width * transform.scaleX
+    + Math.abs(Math.sin(radians)) * base.height * transform.scaleY
+  const height = Math.abs(Math.sin(radians)) * base.width * transform.scaleX
+    + Math.abs(Math.cos(radians)) * base.height * transform.scaleY
+  const centerX = frameWidth / 2 + transform.offsetX * frameWidth
+  const centerY = frameHeight / 2 + transform.offsetY * frameHeight
+  return {
+    left: centerX - width / 2,
+    top: centerY - height / 2,
+    width,
+    height,
+    base,
+  }
+}
+
+function getClipFade(value: number, duration: number) {
+  return value > 0 ? Math.max(0, Math.min(1, duration / value)) : 1
+}
+
+function getVideoOpacity(clip: ProjectMedia, time: number) {
+  const fadeIn = getClipFade(clip.videoFadeIn, clip.reverse ? clip.trimEnd - time : time - clip.trimStart)
+  const fadeOut = getClipFade(clip.videoFadeOut, clip.reverse ? time - clip.trimStart : clip.trimEnd - time)
+  return Math.min(fadeIn, fadeOut)
+}
+
+function getAudioGain(clip: ProjectMedia, time: number) {
+  const fadeIn = getClipFade(clip.audioFadeIn, time - clip.trimStart)
+  const fadeOut = getClipFade(clip.audioFadeOut, clip.trimEnd - time)
+  return clip.reverse ? 0 : clip.volume * Math.min(fadeIn, fadeOut)
+}
+
 function drawVideoFrame(
   context: CanvasRenderingContext2D,
   video: HTMLVideoElement,
   width: number,
   height: number,
+  transform: ClipTransform,
 ) {
-  const sourceWidth = video.videoWidth
-  const sourceHeight = video.videoHeight
-  const scale = Math.min(width / sourceWidth, height / sourceHeight)
-  const displayWidth = sourceWidth * scale
-  const displayHeight = sourceHeight * scale
-  const x = (width - displayWidth) / 2
-  const y = (height - displayHeight) / 2
+  const display = getBaseVideoSize(width, height, video.videoWidth, video.videoHeight, transform.rotation)
   context.fillStyle = '#000'
   context.fillRect(0, 0, width, height)
-  context.drawImage(video, x, y, displayWidth, displayHeight)
+  context.save()
+  context.translate(width / 2 + transform.offsetX * width, height / 2 + transform.offsetY * height)
+  context.rotate(transform.rotation * Math.PI / 180)
+  context.scale(
+    transform.scaleX * (transform.flipHorizontal ? -1 : 1),
+    transform.scaleY * (transform.flipVertical ? -1 : 1),
+  )
+  context.drawImage(video, -display.width / 2, -display.height / 2, display.width, display.height)
+  context.restore()
 }
 
 function drawCaption(
@@ -211,8 +292,16 @@ function App() {
   const [pendingExport, setPendingExport] = useState<{ blob: Blob; filename: string } | null>(null)
   const [notice, setNotice] = useState('')
   const [dragId, setDragId] = useState('')
+  const [isBladeToolActive, setIsBladeToolActive] = useState(false)
+  const [isTransformSelected, setIsTransformSelected] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const previewStageRef = useRef<HTMLDivElement>(null)
+  const timelineTrackRef = useRef<HTMLDivElement>(null)
+  const timelineScrubPointerRef = useRef<number | null>(null)
+  const pendingTimelineSeekRef = useRef<{ id: string; time: number } | null>(null)
+  const transformResizeRef = useRef<TransformResize | null>(null)
+  const transformMoveRef = useRef<TransformMove | null>(null)
+  const reverseTimerRef = useRef<number | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const backupInputRef = useRef<HTMLInputElement>(null)
   const mediaRef = useRef(media)
@@ -220,7 +309,8 @@ function App() {
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const saveVersionRef = useRef(0)
   const audioContextRef = useRef<AudioContext | null>(null)
-  const audioOutputsRef = useRef(new WeakMap<HTMLVideoElement, MediaStreamAudioDestinationNode>())
+  const audioGainsRef = useRef(new WeakMap<HTMLVideoElement, GainNode>())
+  const audioSourcesRef = useRef(new WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>())
 
   const videos = media.filter((item) => item.kind === 'video')
   const audioItems = media.filter((item) => item.kind === 'audio')
@@ -235,10 +325,13 @@ function App() {
   const activeClipIndex = activeVideo ? videos.findIndex((item) => item.id === activeVideo.id) : -1
   const timelineTime = activeClipIndex < 0 ? 0 : videos
     .slice(0, activeClipIndex)
-    .reduce((time, item) => time + Math.max(item.trimEnd - item.trimStart, 0), 0)
-    + Math.max(0, Math.min(currentTime - activeVideo.trimStart, activeVideo.trimEnd - activeVideo.trimStart))
+    .reduce((time, item) => time + Math.max(item.trimEnd - item.trimStart, 0) / item.speed, 0)
+    + Math.max(0, Math.min(
+      (activeVideo.reverse ? activeVideo.trimEnd - currentTime : currentTime - activeVideo.trimStart) / activeVideo.speed,
+      (activeVideo.trimEnd - activeVideo.trimStart) / activeVideo.speed,
+    ))
   const totalDuration = videos.reduce(
-    (total, item) => total + Math.max(item.trimEnd - item.trimStart, 0),
+    (total, item) => total + Math.max(item.trimEnd - item.trimStart, 0) / item.speed,
     0,
   )
   const previewAspectRatio = getAspectRatioValue(aspectRatio, videoDimensions.width, videoDimensions.height)
@@ -247,10 +340,38 @@ function App() {
     previewStageSize.width / previewAspectRatio,
   )
   const previewFrameWidth = previewFrameHeight * previewAspectRatio
+  const activeTransform: ClipTransform | null = activeVideo ? {
+    rotation: activeVideo.rotation,
+    flipHorizontal: activeVideo.flipHorizontal,
+    flipVertical: activeVideo.flipVertical,
+    scaleX: activeVideo.scaleX,
+    scaleY: activeVideo.scaleY,
+    offsetX: activeVideo.offsetX,
+    offsetY: activeVideo.offsetY,
+  } : null
+  const transformedBounds = activeVideo && activeTransform
+    ? getTransformedBounds(
+        previewFrameWidth,
+        previewFrameHeight,
+        videoDimensions.width,
+        videoDimensions.height,
+        activeTransform,
+      )
+    : null
 
-  useEffect(() => {
+  const measurePreviewStage = () => {
     const stage = previewStageRef.current
     if (!stage) return
+    const styles = getComputedStyle(stage)
+    const width = stage.clientWidth - parseFloat(styles.paddingLeft) - parseFloat(styles.paddingRight)
+    const height = stage.clientHeight - parseFloat(styles.paddingTop) - parseFloat(styles.paddingBottom)
+    setPreviewStageSize({ width, height })
+  }
+
+  useLayoutEffect(() => {
+    const stage = previewStageRef.current
+    if (!stage) return
+    measurePreviewStage()
     const observer = new ResizeObserver(([entry]) => {
       setPreviewStageSize({
         width: entry.contentRect.width,
@@ -324,14 +445,25 @@ function App() {
       activeIdRef.current = activeVideo.id
       setTrimStart(activeVideo.trimStart)
       setTrimEnd(activeVideo.trimEnd || activeVideo.duration)
-      setCurrentTime(activeVideo.trimStart)
+      setCurrentTime(activeVideo.reverse ? activeVideo.trimEnd : activeVideo.trimStart)
+      videoRef.current?.pause()
+      if (reverseTimerRef.current !== null) window.clearInterval(reverseTimerRef.current)
+      reverseTimerRef.current = null
+      setIsPlaying(false)
     }
   }, [activeVideo?.id])
 
   useEffect(() => {
+    const video = videoRef.current
+    if (!video || !activeVideo) return
+    if (!activeVideo.reverse) video.playbackRate = activeVideo.speed
+    updatePreviewAudioGain(video, activeVideo, video.currentTime)
+  }, [activeVideo?.speed, activeVideo?.reverse, activeVideo?.volume, activeVideo?.audioFadeIn, activeVideo?.audioFadeOut])
+
+  useEffect(() => {
     if (!isReady || !storageAvailable) return
     const snapshot: ProjectSnapshot = {
-      schemaVersion: 4,
+      schemaVersion: 6,
       id: 'default',
       name: projectName.trim() || 'Proyecto sin título',
       updatedAt: Date.now(),
@@ -368,6 +500,7 @@ function App() {
 
   useEffect(() => {
     return () => {
+      if (reverseTimerRef.current !== null) window.clearInterval(reverseTimerRef.current)
       mediaRef.current.forEach((item) => URL.revokeObjectURL(item.url))
       void audioContextRef.current?.close()
     }
@@ -387,7 +520,7 @@ function App() {
       setNotice('Elige archivos de video o audio para importarlos.')
       return
     }
-    const additions = accepted.map((file) => ({
+    const additions: MediaItem[] = accepted.map((file) => ({
       id: crypto.randomUUID(),
       name: file.name,
       type: file.type,
@@ -398,6 +531,20 @@ function App() {
       duration: 0,
       trimStart: 0,
       trimEnd: 0,
+      rotation: 0 as const,
+      flipHorizontal: false,
+      flipVertical: false,
+      scaleX: 1,
+      scaleY: 1,
+      offsetX: 0,
+      offsetY: 0,
+      volume: 1,
+      audioFadeIn: 0,
+      audioFadeOut: 0,
+      videoFadeIn: 0,
+      videoFadeOut: 0,
+      speed: 1,
+      reverse: false,
     }))
     setMedia((current) => [...current, ...additions])
     const firstVideo = additions.find((item) => item.kind === 'video')
@@ -418,13 +565,40 @@ function App() {
     }
   }
 
+  const ensureVideoAudioGraph = (video: HTMLVideoElement) => {
+    const audioContext = audioContextRef.current ?? new AudioContext()
+    audioContextRef.current = audioContext
+    let gain = audioGainsRef.current.get(video)
+    if (!gain) {
+      const source = audioSourcesRef.current.get(video) ?? audioContext.createMediaElementSource(video)
+      gain = audioContext.createGain()
+      source.connect(gain)
+      gain.connect(audioContext.destination)
+      audioSourcesRef.current.set(video, source)
+      audioGainsRef.current.set(video, gain)
+    }
+    return { audioContext, gain }
+  }
+
+  const updatePreviewAudioGain = (video: HTMLVideoElement, clip: ProjectMedia, time: number) => {
+    const gain = audioGainsRef.current.get(video)
+    if (gain) gain.gain.setTargetAtTime(getAudioGain(clip, time), gain.context.currentTime, 0.015)
+  }
+
   const handleTimeUpdate = () => {
     const video = videoRef.current
     if (!video) return
     setCurrentTime(video.currentTime)
+    if (activeVideo) updatePreviewAudioGain(video, activeVideo, video.currentTime)
     const clipEnd = activeVideo?.trimEnd || trimEnd
     const clipStart = activeVideo?.trimStart ?? trimStart
-    if (clipEnd > clipStart && video.currentTime >= clipEnd) {
+    if (activeVideo?.reverse && clipEnd > clipStart && video.currentTime <= clipStart) {
+      video.pause()
+      video.currentTime = clipStart
+      setIsPlaying(false)
+      if (reverseTimerRef.current !== null) window.clearInterval(reverseTimerRef.current)
+      reverseTimerRef.current = null
+    } else if (clipEnd > clipStart && video.currentTime >= clipEnd && !activeVideo?.reverse) {
       video.pause()
       video.currentTime = clipStart
       setIsPlaying(false)
@@ -436,11 +610,44 @@ function App() {
     if (!video || !activeVideo) return
     const clipStart = activeVideo.trimStart
     const clipEnd = activeVideo.trimEnd || activeVideo.duration
-    if (video.paused) {
-      if (video.currentTime < clipStart || video.currentTime >= clipEnd) {
-        video.currentTime = clipStart
-      }
+    if (!isPlaying) {
       try {
+        const { audioContext, gain } = ensureVideoAudioGraph(video)
+        await audioContext.resume()
+        video.playbackRate = activeVideo.speed
+        if (activeVideo.reverse) {
+          video.pause()
+          if (video.currentTime <= clipStart || video.currentTime > clipEnd) video.currentTime = clipEnd
+          gain.gain.setTargetAtTime(0, audioContext.currentTime, 0.015)
+          setIsPlaying(true)
+          let previousTime = performance.now()
+          reverseTimerRef.current = window.setInterval(() => {
+            const clip = mediaRef.current.find((item) => item.id === activeVideo.id && item.kind === 'video')
+            if (!videoRef.current || !clip || activeIdRef.current !== clip.id) {
+              if (reverseTimerRef.current !== null) window.clearInterval(reverseTimerRef.current)
+              reverseTimerRef.current = null
+              setIsPlaying(false)
+              return
+            }
+            const timestamp = performance.now()
+            const elapsed = timestamp - previousTime
+            previousTime = timestamp
+            if (!video.seeking) {
+              const nextTime = Math.max(clip.trimStart, video.currentTime - elapsed / 1000 * clip.speed)
+              video.currentTime = nextTime
+              setCurrentTime(nextTime)
+              if (nextTime <= clip.trimStart) {
+                video.pause()
+                setIsPlaying(false)
+                if (reverseTimerRef.current !== null) window.clearInterval(reverseTimerRef.current)
+                reverseTimerRef.current = null
+              }
+            }
+          }, 1000 / 30)
+          return
+        }
+        if (video.currentTime < clipStart || video.currentTime >= clipEnd) video.currentTime = clipStart
+        updatePreviewAudioGain(video, activeVideo, video.currentTime)
         await video.play()
         setIsPlaying(true)
       } catch {
@@ -449,6 +656,8 @@ function App() {
     } else {
       video.pause()
       setIsPlaying(false)
+      if (reverseTimerRef.current !== null) window.clearInterval(reverseTimerRef.current)
+      reverseTimerRef.current = null
     }
   }
 
@@ -458,6 +667,69 @@ function App() {
     const nextTime = Math.max(0, Math.min(time, activeVideo?.duration ?? time))
     video.currentTime = nextTime
     setCurrentTime(nextTime)
+    if (activeVideo) updatePreviewAudioGain(video, activeVideo, nextTime)
+  }
+
+  const seekTimelinePosition = (clientX: number) => {
+    const track = timelineTrackRef.current
+    if (!track || totalDuration <= 0 || videos.length === 0) return
+    const bounds = track.getBoundingClientRect()
+    if (!bounds.width) return
+    const progress = Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width))
+    let remaining = Math.min(progress * totalDuration, Math.max(0, totalDuration - 0.001))
+    let target = videos[videos.length - 1]
+    let elapsed = 0
+    for (const clip of videos) {
+      const clipDuration = Math.max(clip.trimEnd - clip.trimStart, 0) / clip.speed
+      target = clip
+      elapsed = Math.min(remaining, clipDuration)
+      if (remaining < clipDuration) break
+      remaining -= clipDuration
+    }
+    const clipStart = target.trimStart
+    const clipEnd = target.trimEnd || target.duration
+    const sourceTime = target.reverse
+      ? Math.max(clipStart + 0.001, clipEnd - elapsed * target.speed)
+      : Math.min(clipEnd - 0.001, clipStart + elapsed * target.speed)
+    if (target.id !== activeIdRef.current) {
+      pendingTimelineSeekRef.current = { id: target.id, time: sourceTime }
+      setActiveId(target.id)
+    } else {
+      pendingTimelineSeekRef.current = null
+      const video = videoRef.current
+      if (video) {
+        video.currentTime = sourceTime
+        updatePreviewAudioGain(video, target, sourceTime)
+      }
+    }
+    setCurrentTime(sourceTime)
+  }
+
+  const beginTimelineScrub = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!event.isPrimary || event.button !== 0 || totalDuration <= 0) return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    timelineScrubPointerRef.current = event.pointerId
+    if (isPlaying) {
+      videoRef.current?.pause()
+      if (reverseTimerRef.current !== null) window.clearInterval(reverseTimerRef.current)
+      reverseTimerRef.current = null
+      setIsPlaying(false)
+    }
+    seekTimelinePosition(event.clientX)
+  }
+
+  const moveTimelineScrub = (event: ReactPointerEvent<HTMLElement>) => {
+    if (timelineScrubPointerRef.current !== event.pointerId) return
+    seekTimelinePosition(event.clientX)
+  }
+
+  const endTimelineScrub = (event: ReactPointerEvent<HTMLElement>) => {
+    if (timelineScrubPointerRef.current !== event.pointerId) return
+    timelineScrubPointerRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
   }
 
   const updateTrimStart = (value: number) => {
@@ -477,6 +749,197 @@ function App() {
     setMedia((items) => items.map((item) =>
       item.id === activeVideo.id ? { ...item, trimEnd: nextEnd } : item,
     ))
+  }
+
+  const updateClipTransform = (transform: Partial<ClipTransform>) => {
+    if (!activeVideo) return
+    setMedia((items) => items.map((item) =>
+      item.id === activeVideo.id ? { ...item, ...transform } : item,
+    ))
+  }
+
+  const updateClipEffects = (updates: Partial<Pick<ProjectMedia, 'volume' | 'audioFadeIn' | 'audioFadeOut' | 'videoFadeIn' | 'videoFadeOut' | 'speed' | 'reverse'>>) => {
+    if (!activeVideo) return
+    setMedia((items) => items.map((item) =>
+      item.id === activeVideo.id ? { ...item, ...updates } : item,
+    ))
+    const video = videoRef.current
+    if (video && updates.speed !== undefined && !activeVideo.reverse) video.playbackRate = updates.speed
+    if (video && (updates.volume !== undefined || updates.audioFadeIn !== undefined || updates.audioFadeOut !== undefined)) {
+      updatePreviewAudioGain(video, { ...activeVideo, ...updates }, video.currentTime)
+    }
+    if (video && updates.reverse !== undefined) {
+      video.pause()
+      if (reverseTimerRef.current !== null) window.clearInterval(reverseTimerRef.current)
+      reverseTimerRef.current = null
+      setIsPlaying(false)
+      if (updates.reverse && video.currentTime <= activeVideo.trimStart) video.currentTime = activeVideo.trimEnd
+      if (!updates.reverse) video.playbackRate = activeVideo.speed
+      updatePreviewAudioGain(video, { ...activeVideo, ...updates }, video.currentTime)
+    }
+  }
+
+  const rotateClip = (direction: -1 | 1) => {
+    if (!activeVideo) return
+    updateClipTransform({ rotation: ((activeVideo.rotation + direction * 90 + 360) % 360) as ProjectMedia['rotation'] })
+  }
+
+  const resetClipTransform = () => updateClipTransform({
+    rotation: 0,
+    flipHorizontal: false,
+    flipVertical: false,
+    scaleX: 1,
+    scaleY: 1,
+    offsetX: 0,
+    offsetY: 0,
+  })
+
+  const startTransformResize = (event: ReactPointerEvent<HTMLButtonElement>, handle: TransformHandle) => {
+    if (!activeVideo || !activeTransform || !transformedBounds || !previewFrameWidth || !previewFrameHeight) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setIsTransformSelected(true)
+    transformResizeRef.current = {
+      pointerId: event.pointerId,
+      handle,
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      frameWidth: previewFrameWidth,
+      frameHeight: previewFrameHeight,
+      boundsWidth: transformedBounds.width,
+      boundsHeight: transformedBounds.height,
+      transform: activeTransform,
+    }
+  }
+
+  const resizeTransform = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = transformResizeRef.current
+    if (!drag || drag.pointerId !== event.pointerId || !activeVideo) return
+    const deltaX = event.clientX - drag.pointerX
+    const deltaY = event.clientY - drag.pointerY
+    const { handle, transform } = drag
+    const next: Partial<ClipTransform> = {}
+    const horizontalHandle = handle.includes('e') || handle.includes('w')
+    const verticalHandle = handle.includes('n') || handle.includes('s')
+    const horizontalAxisUsesScaleX = Math.abs(transform.rotation % 180) === 0
+
+    if ((handle === 'e' || handle === 'w') && horizontalHandle) {
+      const direction = handle === 'e' ? 1 : -1
+      const axis = horizontalAxisUsesScaleX ? 'scaleX' : 'scaleY'
+      const scale = transform[axis] * (drag.boundsWidth + direction * deltaX) / drag.boundsWidth
+      const boundedScale = Math.max(0.1, Math.min(8, scale))
+      next[axis] = boundedScale
+      next.offsetX = Math.max(-8, Math.min(8, transform.offsetX + direction * drag.boundsWidth * (boundedScale / transform[axis] - 1) / (2 * drag.frameWidth)))
+    } else if ((handle === 'n' || handle === 's') && verticalHandle) {
+      const direction = handle === 's' ? 1 : -1
+      const axis = horizontalAxisUsesScaleX ? 'scaleY' : 'scaleX'
+      const scale = transform[axis] * (drag.boundsHeight + direction * deltaY) / drag.boundsHeight
+      const boundedScale = Math.max(0.1, Math.min(8, scale))
+      next[axis] = boundedScale
+      next.offsetY = Math.max(-8, Math.min(8, transform.offsetY + direction * drag.boundsHeight * (boundedScale / transform[axis] - 1) / (2 * drag.frameHeight)))
+    } else {
+      const directionX = handle.includes('e') ? 1 : -1
+      const directionY = handle.includes('s') ? 1 : -1
+      const startX = directionX * drag.boundsWidth / 2
+      const startY = directionY * drag.boundsHeight / 2
+      const denominator = startX * startX + startY * startY
+      const factor = Math.max(0.1, Math.min(
+        Math.min(8 / transform.scaleX, 8 / transform.scaleY),
+        ((startX + deltaX) * startX + (startY + deltaY) * startY) / denominator,
+      ))
+      next.scaleX = transform.scaleX * factor
+      next.scaleY = transform.scaleY * factor
+      next.offsetX = Math.max(-8, Math.min(8, transform.offsetX + startX * (factor - 1) / drag.frameWidth))
+      next.offsetY = Math.max(-8, Math.min(8, transform.offsetY + startY * (factor - 1) / drag.frameHeight))
+    }
+    updateClipTransform(next)
+  }
+
+  const endTransformResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (transformResizeRef.current?.pointerId === event.pointerId) transformResizeRef.current = null
+    if (transformMoveRef.current?.pointerId === event.pointerId) transformMoveRef.current = null
+  }
+
+  const startTransformMove = (event: ReactPointerEvent<HTMLVideoElement>) => {
+    if (!activeVideo || !activeTransform || !previewFrameWidth || !previewFrameHeight) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setIsTransformSelected(true)
+    transformMoveRef.current = {
+      pointerId: event.pointerId,
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      frameWidth: previewFrameWidth,
+      frameHeight: previewFrameHeight,
+      transform: activeTransform,
+    }
+  }
+
+  const moveTransform = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = transformMoveRef.current
+    if (!drag || drag.pointerId !== event.pointerId || !activeVideo) return
+    updateClipTransform({
+      offsetX: Math.max(-8, Math.min(8, drag.transform.offsetX + (event.clientX - drag.pointerX) / drag.frameWidth)),
+      offsetY: Math.max(-8, Math.min(8, drag.transform.offsetY + (event.clientY - drag.pointerY) / drag.frameHeight)),
+    })
+  }
+
+  const splitClipAt = (clipId: string, time: number) => {
+    const clip = media.find((item) => item.id === clipId && item.kind === 'video')
+    if (!clip) return
+    const clipEnd = clip.trimEnd || clip.duration
+    const splitTime = Math.max(clip.trimStart, Math.min(time, clipEnd))
+    if (splitTime - clip.trimStart < 0.05 || clipEnd - splitTime < 0.05) {
+      setNotice('El punto de división debe dejar al menos 0,05 segundos en cada segmento.')
+      return
+    }
+
+    const rightId = crypto.randomUUID()
+    const rightClip: MediaItem = {
+      ...clip,
+      id: rightId,
+      url: URL.createObjectURL(clip.file),
+      trimStart: splitTime,
+      trimEnd: clipEnd,
+    }
+    const videoItems = media.filter((item) => item.kind === 'video')
+    const clipIndex = videoItems.findIndex((item) => item.id === clipId)
+    videoItems.splice(clipIndex, 1, { ...clip, trimEnd: splitTime }, rightClip)
+    setMedia([...videoItems, ...media.filter((item) => item.kind === 'audio')])
+    setCaptionSegments((segments) => segments.flatMap((caption) => {
+      if (caption.mediaId !== clipId || caption.end <= splitTime) return [caption]
+      if (caption.start >= splitTime) return [{ ...caption, mediaId: rightId }]
+      return [
+        { ...caption, end: splitTime },
+        { ...caption, id: crypto.randomUUID(), mediaId: rightId, start: splitTime },
+      ]
+    }))
+    setIsBladeToolActive(false)
+    setNotice('Clip dividido en dos segmentos.')
+  }
+
+  const splitActiveClip = () => {
+    if (!activeVideo) return
+    splitClipAt(activeVideo.id, currentTime)
+  }
+
+  const cutAtTimelinePosition = (event: ReactMouseEvent<HTMLDivElement>, clip: MediaItem) => {
+    if (!isBladeToolActive) {
+      setActiveId(clip.id)
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const progress = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width))
+    const clipEnd = clip.trimEnd || clip.duration
+    const sourceTime = clip.reverse
+      ? clipEnd - progress * (clipEnd - clip.trimStart)
+      : clip.trimStart + progress * (clipEnd - clip.trimStart)
+    setActiveId(clip.id)
+    splitClipAt(clip.id, sourceTime)
   }
 
   const removeMedia = (id: string) => {
@@ -703,22 +1166,23 @@ function App() {
       setNotice('La exportación con audio no está disponible en este navegador.')
       return
     }
-    let audioOutput: MediaStreamAudioDestinationNode
+    let audioOutput: MediaStreamAudioDestinationNode | undefined
+    let audioGain: GainNode | undefined
     try {
       const audioContext = audioContextRef.current ?? new AudioContext()
       audioContextRef.current = audioContext
-      const existingOutput = audioOutputsRef.current.get(video)
-      if (existingOutput) {
-        audioOutput = existingOutput
-      } else {
-        audioOutput = audioContext.createMediaStreamDestination()
-        const source = audioContext.createMediaElementSource(video)
-        source.connect(audioOutput)
-        source.connect(audioContext.destination)
-        audioOutputsRef.current.set(video, audioOutput)
-      }
+      audioOutput = audioContext.createMediaStreamDestination()
+      audioGain = ensureVideoAudioGraph(video).gain
+      audioGain.connect(audioOutput)
       await audioContext.resume()
     } catch {
+      if (audioGain && audioOutput) audioGain.disconnect(audioOutput)
+      stream.getTracks().forEach((track) => track.stop())
+      setIsExporting(false)
+      setNotice('No se pudo preparar el audio para la exportación.')
+      return
+    }
+    if (!audioOutput || !audioGain) {
       stream.getTracks().forEach((track) => track.stop())
       setIsExporting(false)
       setNotice('No se pudo preparar el audio para la exportación.')
@@ -728,6 +1192,7 @@ function App() {
     const mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
       .find((type) => MediaRecorder.isTypeSupported(type))
     if (!mimeType) {
+      audioGain.disconnect(audioOutput)
       stream.getTracks().forEach((track) => track.stop())
       setIsExporting(false)
       setNotice('Este navegador no ofrece un formato WebM compatible.')
@@ -741,11 +1206,15 @@ function App() {
     recorder.onerror = () => {
       video.pause()
       video.onseeked = null
+      if (audioGain && audioOutput) audioGain.disconnect(audioOutput)
+      video.playbackRate = activeVideo.speed
       stream.getTracks().forEach((track) => track.stop())
       setIsExporting(false)
       setNotice('Ocurrió un error durante la exportación.')
     }
     recorder.onstop = () => {
+      if (audioGain && audioOutput) audioGain.disconnect(audioOutput)
+      video.playbackRate = activeVideo.speed
       if (!chunks.length) {
         stream.getTracks().forEach((track) => track.stop())
         setIsExporting(false)
@@ -765,14 +1234,20 @@ function App() {
     }
 
     const drawFrame = () => {
-      if (video.currentTime >= clipEnd || video.ended) {
+      const finished = activeVideo.reverse
+        ? video.currentTime <= clipStart
+        : video.currentTime >= clipEnd || video.ended
+      context.globalAlpha = getVideoOpacity(activeVideo, video.currentTime)
+      context.filter = filter.css
+      drawVideoFrame(context, video, canvas.width, canvas.height, activeVideo)
+      context.globalAlpha = 1
+      context.filter = 'none'
+      audioGain.gain.setTargetAtTime(getAudioGain(activeVideo, video.currentTime), audioGain.context.currentTime, 0.015)
+      if (finished) {
         video.pause()
         recorder.stop()
         return
       }
-      context.filter = filter.css
-      drawVideoFrame(context, video, canvas.width, canvas.height)
-      context.filter = 'none'
       if (overlayText.trim()) {
         const fontSize = Math.max(24, Math.round(canvas.width * 0.045))
         context.font = `700 ${fontSize}px system-ui, sans-serif`
@@ -792,14 +1267,26 @@ function App() {
       if (frameCaption?.text.trim()) {
         drawCaption(context, frameCaption.text, captionStyle, canvas.width, canvas.height)
       }
-      requestAnimationFrame(drawFrame)
+      if (activeVideo.reverse) {
+        video.onseeked = () => requestAnimationFrame(drawFrame)
+        video.currentTime = Math.max(clipStart, video.currentTime - activeVideo.speed / 30)
+      } else {
+        requestAnimationFrame(drawFrame)
+      }
     }
 
     const beginRecording = async () => {
       video.onseeked = null
       try {
-        await video.play()
-        requestAnimationFrame(drawFrame)
+        video.playbackRate = activeVideo.speed
+        if (activeVideo.reverse) {
+          video.pause()
+          requestAnimationFrame(drawFrame)
+        } else {
+          audioGain.gain.setTargetAtTime(getAudioGain(activeVideo, clipStart), audioGain.context.currentTime, 0.015)
+          await video.play()
+          requestAnimationFrame(drawFrame)
+        }
       } catch {
         recorder.stop()
         setIsExporting(false)
@@ -807,17 +1294,18 @@ function App() {
       }
     }
     recorder.start()
-    if (Math.abs(video.currentTime - clipStart) < 0.001) {
+    const exportStart = activeVideo.reverse ? clipEnd : clipStart
+    if (Math.abs(video.currentTime - exportStart) < 0.001) {
       void beginRecording()
     } else {
       video.onseeked = () => void beginRecording()
-      video.currentTime = clipStart
+      video.currentTime = exportStart
     }
   }
 
   const exportBackup = () => {
     const snapshot: ProjectSnapshot = {
-      schemaVersion: 4,
+      schemaVersion: 6,
       id: 'default',
       name: projectName.trim() || 'Proyecto sin título',
       updatedAt: Date.now(),
@@ -1265,6 +1753,15 @@ function App() {
             {activeVideo ? (
               <div
                 className="video-frame"
+                onClick={(event) => {
+                  if (event.target === videoRef.current) setIsTransformSelected(true)
+                }}
+                onPointerMove={(event) => {
+                  resizeTransform(event)
+                  moveTransform(event)
+                }}
+                onPointerUp={endTransformResize}
+                onPointerCancel={endTransformResize}
                 style={{
                   aspectRatio: String(previewAspectRatio),
                   width: previewFrameWidth ? `${previewFrameWidth}px` : undefined,
@@ -1281,13 +1778,67 @@ function App() {
                       width: event.currentTarget.videoWidth,
                       height: event.currentTarget.videoHeight,
                     })
+                    const pendingSeek = pendingTimelineSeekRef.current
+                    if (pendingSeek?.id === activeVideo.id) {
+                      event.currentTarget.currentTime = pendingSeek.time
+                      setCurrentTime(pendingSeek.time)
+                      pendingTimelineSeekRef.current = null
+                    }
+                    measurePreviewStage()
                   }}
                   onTimeUpdate={handleTimeUpdate}
                   onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
-                  style={{ filter: filter.css }}
+                  onPause={() => {
+                    if (reverseTimerRef.current === null) setIsPlaying(false)
+                  }}
+                  style={{
+                    filter: filter.css,
+                    opacity: getVideoOpacity(activeVideo, currentTime),
+                    width: transformedBounds ? `${transformedBounds.base.width}px` : undefined,
+                    height: transformedBounds ? `${transformedBounds.base.height}px` : undefined,
+                    left: activeTransform ? `${50 + activeTransform.offsetX * 100}%` : '50%',
+                    top: activeTransform ? `${50 + activeTransform.offsetY * 100}%` : '50%',
+                    transform: activeTransform
+                      ? `translate(-50%, -50%) rotate(${activeTransform.rotation}deg) scaleX(${activeTransform.scaleX * (activeTransform.flipHorizontal ? -1 : 1)}) scaleY(${activeTransform.scaleY * (activeTransform.flipVertical ? -1 : 1)})`
+                      : undefined,
+                  }}
+                  onPointerDown={startTransformMove}
                   playsInline
                 />
+                {isTransformSelected && transformedBounds && (
+                  <div
+                    className="transform-selection"
+                    style={{
+                      left: `${transformedBounds.left}px`,
+                      top: `${transformedBounds.top}px`,
+                      width: `${transformedBounds.width}px`,
+                      height: `${transformedBounds.height}px`,
+                    }}
+                  >
+                    {([
+                      ['nw', 0, 0],
+                      ['n', 50, 0],
+                      ['ne', 100, 0],
+                      ['e', 100, 50],
+                      ['se', 100, 100],
+                      ['s', 50, 100],
+                      ['sw', 0, 100],
+                      ['w', 0, 50],
+                    ] as [TransformHandle, number, number][]).map(([handle, left, top]) => (
+                      <button
+                        key={handle}
+                        type="button"
+                        className={`transform-handle transform-handle-${handle}`}
+                        aria-label={handle.length === 2 ? `Escalar desde vértice ${handle}` : `Estirar desde arista ${handle}`}
+                        style={{
+                          left: `${Math.max(5, Math.min(previewFrameWidth - 5, transformedBounds.left + transformedBounds.width * left / 100)) - transformedBounds.left}px`,
+                          top: `${Math.max(5, Math.min(previewFrameHeight - 5, transformedBounds.top + transformedBounds.height * top / 100)) - transformedBounds.top}px`,
+                        }}
+                        onPointerDown={(event) => startTransformResize(event, handle)}
+                      />
+                    ))}
+                  </div>
+                )}
                 {(overlayText || previewCaption?.text) && (
                   <div className="video-overlay">
                     {overlayText && <strong>{overlayText}</strong>}
@@ -1323,7 +1874,7 @@ function App() {
             <button className="fullscreen-button" aria-label="Vista de pantalla completa" onClick={() => document.querySelector('.video-frame')?.requestFullscreen?.()}>⛶</button>
           </div>
 
-          <section className="timeline">
+          <section className={`timeline ${isBladeToolActive ? 'blade-active' : ''}`}>
             <div className="timeline-topbar">
               <div className="timeline-title"><span>LINEA DE TIEMPO</span><span className="clip-count">{videos.length} clips</span></div>
               <div className="timeline-actions">
@@ -1335,7 +1886,14 @@ function App() {
                 <button onClick={() => setNotice('Zoom de línea de tiempo próximamente.')}>＋</button>
               </div>
             </div>
-            <div className="timeline-ruler">
+            <div
+              className="timeline-ruler"
+              onPointerDown={beginTimelineScrub}
+              onPointerMove={moveTimelineScrub}
+              onPointerUp={endTimelineScrub}
+              onPointerCancel={endTimelineScrub}
+              title="Pulsa o arrastra para mover la posición de reproducción"
+            >
               <span>00:00</span>
               <span>{formatTime(totalDuration / 4)}</span>
               <span>{formatTime(totalDuration / 2)}</span>
@@ -1344,14 +1902,14 @@ function App() {
             </div>
             <div className="timeline-track video-track">
               <div className="track-label"><span className="track-icon">▧</span><span>Video</span></div>
-              <div className="track-content">
+              <div className="track-content" ref={timelineTrackRef}>
                 {videos.length === 0 ? (
                   <button className="track-empty" onClick={() => fileInputRef.current?.click()}>＋ Arrastra clips aquí o importa medios</button>
                 ) : videos.map((item, index) => (
                   <div
                     key={item.id}
                     className={`timeline-clip ${item.id === activeId ? 'selected' : ''}`}
-                    style={{ flex: `${Math.max(item.trimEnd - item.trimStart, 1)} 1 0%` }}
+                    style={{ flex: `${Math.max(item.trimEnd - item.trimStart, 1) / item.speed} 1 0%` }}
                     draggable
                     onDragStart={() => setDragId(item.id)}
                     onDragOver={(event) => event.preventDefault()}
@@ -1359,7 +1917,8 @@ function App() {
                       moveClip(dragId, item.id)
                       setDragId('')
                     }}
-                    onClick={() => setActiveId(item.id)}
+                    onClick={(event) => cutAtTimelinePosition(event, item)}
+                    aria-label={`${isBladeToolActive ? 'Cortar' : 'Seleccionar'} ${item.file.name}`}
                     title={`${item.file.name} · clip ${index + 1}`}
                   >
                     <span className="clip-filmstrip"><span>▶</span><strong>{item.file.name}</strong>{item.duration > 0 && <small>{formatTime(item.duration)}</small>}</span>
@@ -1367,7 +1926,17 @@ function App() {
                 ))}
                 {activeVideo && (
                   <div className="playhead" style={{ left: `${totalDuration ? (timelineTime / totalDuration) * 100 : 0}%` }}>
-                    <span />
+                    <button
+                      type="button"
+                      className="playhead-handle"
+                      aria-label={`Posición de reproducción: ${formatTime(timelineTime)}`}
+                      title="Arrastra para mover la posición de reproducción"
+                      onPointerDown={beginTimelineScrub}
+                      onPointerMove={moveTimelineScrub}
+                      onPointerUp={endTimelineScrub}
+                      onPointerCancel={endTimelineScrub}
+                      onClick={(event) => event.stopPropagation()}
+                    />
                   </div>
                 )}
               </div>
@@ -1383,6 +1952,60 @@ function App() {
               <div className="track-content">
                 {activeAudio ? <button className="audio-clip" onClick={() => selectPanel('audio')}>♫ {activeAudio.file.name}</button> : <button className="track-empty subtle" onClick={() => selectPanel('audio')}>＋ Añade audio</button>}
               </div>
+            </div>
+            <div className="timeline-edit-tools" role="toolbar" aria-label="Edición del clip seleccionado">
+              <button
+                type="button"
+                aria-label={isBladeToolActive ? 'Desactivar cortar' : 'Cortar en un punto de la línea de tiempo'}
+                aria-pressed={isBladeToolActive}
+                title="Cortar: elige un punto del clip"
+                onClick={() => setIsBladeToolActive((active) => !active)}
+              >✂</button>
+              <button type="button" aria-label="Recortar clip" title="Recortar: ajustar inicio y final" onClick={() => document.getElementById('trim-start')?.focus()}>◫</button>
+              <button type="button" aria-label="Dividir en la posición actual" title="Dividir en el cabezal" onClick={splitActiveClip} disabled={!activeVideo}>∥</button>
+              <button type="button" aria-label="Borrar clip seleccionado" title="Borrar clip" onClick={() => activeVideo && removeMedia(activeVideo.id)} disabled={!activeVideo}>×</button>
+              <button type="button" aria-label="Ajustar volumen" title="Volumen del audio" onClick={() => document.getElementById('clip-volume')?.focus()} disabled={!activeVideo}>♫</button>
+              <button
+                type="button"
+                aria-label="Alternar fade-in de audio"
+                aria-pressed={Boolean(activeVideo?.audioFadeIn)}
+                title="Fade-in de audio"
+                onClick={() => activeVideo && updateClipEffects({ audioFadeIn: activeVideo.audioFadeIn ? 0 : 1 })}
+                disabled={!activeVideo}
+              >↗</button>
+              <button
+                type="button"
+                aria-label="Alternar fade-out de audio"
+                aria-pressed={Boolean(activeVideo?.audioFadeOut)}
+                title="Fade-out de audio"
+                onClick={() => activeVideo && updateClipEffects({ audioFadeOut: activeVideo.audioFadeOut ? 0 : 1 })}
+                disabled={!activeVideo}
+              >↘</button>
+              <button
+                type="button"
+                aria-label="Alternar fade-in de video"
+                aria-pressed={Boolean(activeVideo?.videoFadeIn)}
+                title="Fade-in de video"
+                onClick={() => activeVideo && updateClipEffects({ videoFadeIn: activeVideo.videoFadeIn ? 0 : 1 })}
+                disabled={!activeVideo}
+              >▴</button>
+              <button
+                type="button"
+                aria-label="Alternar fade-out de video"
+                aria-pressed={Boolean(activeVideo?.videoFadeOut)}
+                title="Fade-out de video"
+                onClick={() => activeVideo && updateClipEffects({ videoFadeOut: activeVideo.videoFadeOut ? 0 : 1 })}
+                disabled={!activeVideo}
+              >▾</button>
+              <button type="button" aria-label="Ajustar velocidad" title="Velocidad del clip" onClick={() => document.getElementById('clip-speed')?.focus()} disabled={!activeVideo}>1×</button>
+              <button
+                type="button"
+                aria-label="Alternar reproducción inversa"
+                aria-pressed={Boolean(activeVideo?.reverse)}
+                title="Avance inverso"
+                onClick={() => activeVideo && updateClipEffects({ reverse: !activeVideo.reverse })}
+                disabled={!activeVideo}
+              >↶</button>
             </div>
           </section>
         </section>
@@ -1400,8 +2023,55 @@ function App() {
                 <div className="time-input"><input id="trim-end" type="number" min={activeVideo.trimStart + .1} max={activeVideo.duration} step=".1" value={activeVideo.trimEnd || activeVideo.duration} onChange={(event) => updateTrimEnd(Number(event.target.value))} /><span>seg</span></div>
               </div>
               <div className="inspector-section">
-                <div className="section-title">Velocidad <span className="coming-soon">Próximamente</span></div>
-                <div className="disabled-control">1.0× <span>⌄</span></div>
+                <div className="section-title">Audio del clip</div>
+                <label className="field-label" htmlFor="clip-volume">Volumen · {Math.round(activeVideo.volume * 100)}%</label>
+                <input id="clip-volume" className="range-control" type="range" min="0" max="2" step="0.05" value={activeVideo.volume} onChange={(event) => updateClipEffects({ volume: Number(event.target.value) })} />
+                <label className="field-label" htmlFor="audio-fade-in">Fade-in · {activeVideo.audioFadeIn.toFixed(1)} s</label>
+                <input id="audio-fade-in" className="range-control" type="range" min="0" max="10" step="0.1" value={activeVideo.audioFadeIn} onChange={(event) => updateClipEffects({ audioFadeIn: Number(event.target.value) })} />
+                <label className="field-label" htmlFor="audio-fade-out">Fade-out · {activeVideo.audioFadeOut.toFixed(1)} s</label>
+                <input id="audio-fade-out" className="range-control" type="range" min="0" max="10" step="0.1" value={activeVideo.audioFadeOut} onChange={(event) => updateClipEffects({ audioFadeOut: Number(event.target.value) })} />
+              </div>
+              <div className="inspector-section">
+                <div className="section-title">Video del clip</div>
+                <label className="field-label" htmlFor="video-fade-in">Fade-in · {activeVideo.videoFadeIn.toFixed(1)} s</label>
+                <input id="video-fade-in" className="range-control" type="range" min="0" max="10" step="0.1" value={activeVideo.videoFadeIn} onChange={(event) => updateClipEffects({ videoFadeIn: Number(event.target.value) })} />
+                <label className="field-label" htmlFor="video-fade-out">Fade-out · {activeVideo.videoFadeOut.toFixed(1)} s</label>
+                <input id="video-fade-out" className="range-control" type="range" min="0" max="10" step="0.1" value={activeVideo.videoFadeOut} onChange={(event) => updateClipEffects({ videoFadeOut: Number(event.target.value) })} />
+                <label className="field-label" htmlFor="clip-speed">Velocidad · {activeVideo.speed.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}×</label>
+                <select
+                  id="clip-speed"
+                  value={activeVideo.speed}
+                  onChange={(event) => updateClipEffects({ speed: Number(event.target.value) })}
+                >
+                  {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].map((speed) => (
+                    <option key={speed} value={speed}>{speed}×</option>
+                  ))}
+                </select>
+                <label className="reverse-control">
+                  <input type="checkbox" checked={activeVideo.reverse} onChange={(event) => updateClipEffects({ reverse: event.target.checked })} />
+                  Avance inverso
+                </label>
+                <small className="control-hint">En avance inverso se silencia el audio original del clip.</small>
+              </div>
+              <div className="inspector-section">
+                <div className="section-title">
+                  Transformar
+                  <button type="button" onClick={resetClipTransform}>Restablecer transformación</button>
+                </div>
+                <div className="transform-actions">
+                  <button type="button" aria-label="Rotar en sentido horario" onClick={() => rotateClip(1)}>↻ <span>CW</span></button>
+                  <button type="button" aria-label="Rotar en sentido antihorario" onClick={() => rotateClip(-1)}>↺ <span>CCW</span></button>
+                  <button
+                    type="button"
+                    aria-pressed={activeVideo.flipHorizontal}
+                    onClick={() => updateClipTransform({ flipHorizontal: !activeVideo.flipHorizontal })}
+                  >↔ <span>Espejo H</span></button>
+                  <button
+                    type="button"
+                    aria-pressed={activeVideo.flipVertical}
+                    onClick={() => updateClipTransform({ flipVertical: !activeVideo.flipVertical })}
+                  >↕ <span>Espejo V</span></button>
+                </div>
               </div>
               <div className="inspector-section">
                 <div className="section-title">Filtro</div>

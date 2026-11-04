@@ -114,7 +114,12 @@ Basic Auth restringe el acceso a la aplicación, pero no crea cuentas dentro de 
 
 - Importar video y audio local, con vista previa de clips.
 - Ordenar clips de video arrastrándolos en la línea de tiempo.
+- Mover la posición de reproducción pulsando la regla de tiempo o arrastrando el cabezal sobre los clips.
 - Recortar inicio y final por clip.
+- Transformar cada clip con rotación horaria/antihoraria, espejo horizontal/vertical y controles de escala desde los bordes y vértices en la vista previa. Arrastra la imagen para moverla; el borde discontinuo marca el lienzo y permite ver el video fuera del área de edición. Restablece la transformación desde el inspector.
+- Cortar un clip haciendo clic en el punto deseado de la línea de tiempo, dividirlo en la posición actual y eliminar clips desde la barra inferior de edición.
+- Ajustar velocidad, avance inverso, volumen y fundidos de audio/video del clip seleccionado. Estos ajustes se guardan y se aplican a la vista previa y a la exportación del clip.
+- En avance inverso se silencia el audio original, ya que el navegador no reproduce audio hacia atrás. Las pistas de audio importadas se pueden previsualizar, pero todavía no se mezclan en la exportación.
 - Añadir un título y subtítulos manuales.
 - Generar subtítulos con transcripción local en el servidor, editar texto y tiempos de cada segmento y elegir estilos Limpio, Contorno, Recuadro rosa, Itálica, Palabra clave, Condensado, Serif o Minimal. El estilo seleccionado se guarda con el proyecto y se incluye en la exportación.
 - Elegir formatos de video Original, 9:16, 16:9, 1:1, 4:3, 3:4, 3:2, 2:1, 2.35:1, 1.85:1 o 128:27. El video completo conserva sus proporciones dentro del lienzo, con bandas si hace falta; el formato se conserva en el proyecto, la copia de seguridad y la exportación.
