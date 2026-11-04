@@ -89,11 +89,16 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .preview-label { display: flex; align-items: center; gap: 7px; overflow: hidden; color: #a5a5b1; font-size: 9px; font-weight: 600; letter-spacing: .65px; text-overflow: ellipsis; white-space: nowrap; }
 .preview-label .live-dot { width: 6px; height: 6px; background: #a68af6; }
 .divider { color: #555663; }
+.ratio-control { position: relative; }
 .ratio-button { padding: 5px 8px; border: 1px solid #34353e; border-radius: 4px; background: #1c1d24; color: #aaaab7; font-size: 9px; cursor: pointer; }
 .ratio-button span { margin-left: 7px; }
+.ratio-menu { position: absolute; z-index: 5; top: calc(100% + 7px); right: 0; width: min(250px, 85vw); max-height: min(360px, 70vh); padding: 8px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; overflow-y: auto; border: 1px solid #393a45; border-radius: 7px; background: #202127; box-shadow: 0 8px 24px #0009; }
+.ratio-option { min-width: 0; min-height: 57px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 1px solid transparent; border-radius: 5px; background: #292a32; color: #a9a9b5; font-size: 8px; cursor: pointer; }
+.ratio-option.selected { border-color: #a28bec; background: #302b3d; color: #e0d7ff; }
+.ratio-option-icon { width: 20px; max-width: 27px; max-height: 23px; border: 1px solid currentColor; border-radius: 2px; }
 .preview-stage { min-height: 200px; flex: 1; display: grid; place-items: center; padding: 24px 28px 8px; overflow: hidden; }
-.video-frame { position: relative; width: min(100%, 720px); max-height: 100%; aspect-ratio: 16 / 9; display: grid; place-items: center; overflow: hidden; border-radius: 5px; background: #090a0d; box-shadow: 0 9px 35px #0005; }
-.video-frame video { width: 100%; height: 100%; object-fit: contain; }
+.video-frame { position: relative; width: min(100%, 720px); max-width: 100%; max-height: 100%; aspect-ratio: 16 / 9; display: grid; place-items: center; overflow: hidden; border-radius: 5px; background: #090a0d; box-shadow: 0 9px 35px #0005; }
+.video-frame video { width: 100%; height: 100%; object-fit: cover; }
 .video-overlay { position: absolute; inset: auto 5% 8%; display: flex; flex-direction: column; align-items: center; gap: 7px; color: white; text-align: center; text-shadow: 0 2px 6px #000; pointer-events: none; }
 .video-overlay strong { font: 700 clamp(15px, 2vw, 27px) 'Manrope', sans-serif; }
 .video-overlay span { max-width: 90%; padding: 0; border-radius: 0; background: transparent; font-size: clamp(10px, 1.2vw, 14px); line-height: 1.2; white-space: pre-wrap; }

@@ -20,9 +20,10 @@ export type CaptionSegment = {
 }
 
 export type CaptionStyle = 'classic' | 'outline' | 'pink' | 'italic' | 'yellow' | 'impact' | 'serif' | 'minimal'
+export type VideoAspectRatio = 'original' | '9:16' | '16:9' | '1:1' | '4:3' | '3:4' | '3:2' | '2:1' | '2.35:1' | '1.85:1' | '128:27'
 
 export type ProjectSnapshot = {
-  schemaVersion: 3
+  schemaVersion: 4
   id: 'default'
   name: string
   updatedAt: number
@@ -31,6 +32,7 @@ export type ProjectSnapshot = {
   overlayText: string
   captionSegments: CaptionSegment[]
   captionStyle: CaptionStyle
+  aspectRatio: VideoAspectRatio
   filterName: string
 }
 
@@ -131,6 +133,20 @@ function isCaptionStyle(value: unknown): value is CaptionStyle {
     value === 'minimal'
 }
 
+function isVideoAspectRatio(value: unknown): value is VideoAspectRatio {
+  return value === 'original' ||
+    value === '9:16' ||
+    value === '16:9' ||
+    value === '1:1' ||
+    value === '4:3' ||
+    value === '3:4' ||
+    value === '3:2' ||
+    value === '2:1' ||
+    value === '2.35:1' ||
+    value === '1.85:1' ||
+    value === '128:27'
+}
+
 function isCaptionSegments(value: unknown, media: ProjectMedia[]): value is CaptionSegment[] {
   return Array.isArray(value) &&
     value.length <= 5000 &&
@@ -141,9 +157,11 @@ function isCaptionSegments(value: unknown, media: ProjectMedia[]): value is Capt
 export function validateProjectSnapshot(value: unknown): value is ProjectSnapshot {
   if (!value || typeof value !== 'object') return false
   const project = value as Record<string, unknown>
-  if (!isValidProjectBase(project, 3)) return false
+  if (!isValidProjectBase(project, 4)) return false
   const media = project.media as ProjectMedia[]
-  return isCaptionSegments(project.captionSegments, media) && isCaptionStyle(project.captionStyle)
+  return isCaptionSegments(project.captionSegments, media) &&
+    isCaptionStyle(project.captionStyle) &&
+    isVideoAspectRatio(project.aspectRatio)
 }
 
 export function normalizeProjectSnapshot(value: unknown): ProjectSnapshot {
@@ -154,6 +172,7 @@ export function normalizeProjectSnapshot(value: unknown): ProjectSnapshot {
 
   const legacy = value as Record<string, unknown>
   let captionSegments: CaptionSegment[]
+  let captionStyle: CaptionStyle = 'classic'
   if (
     legacy.schemaVersion === 1 &&
     isValidProjectBase(legacy, 1) &&
@@ -179,12 +198,20 @@ export function normalizeProjectSnapshot(value: unknown): ProjectSnapshot {
     isCaptionSegments(legacy.captionSegments, legacy.media as ProjectMedia[])
   ) {
     captionSegments = legacy.captionSegments
+  } else if (
+    legacy.schemaVersion === 3 &&
+    isValidProjectBase(legacy, 3) &&
+    isCaptionSegments(legacy.captionSegments, legacy.media as ProjectMedia[]) &&
+    isCaptionStyle(legacy.captionStyle)
+  ) {
+    captionSegments = legacy.captionSegments
+    captionStyle = legacy.captionStyle
   } else {
     throw new Error('El proyecto guardado tiene un formato no compatible.')
   }
 
   const snapshot: ProjectSnapshot = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: 'default',
     name: legacy.name as string,
     updatedAt: legacy.updatedAt as number,
@@ -192,7 +219,8 @@ export function normalizeProjectSnapshot(value: unknown): ProjectSnapshot {
     activeId: legacy.activeId as string,
     overlayText: legacy.overlayText as string,
     captionSegments,
-    captionStyle: isCaptionStyle(legacy.captionStyle) ? legacy.captionStyle : 'classic',
+    captionStyle: isCaptionStyle(legacy.captionStyle) ? legacy.captionStyle : captionStyle,
+    aspectRatio: isVideoAspectRatio(legacy.aspectRatio) ? legacy.aspectRatio : 'original',
     filterName: legacy.filterName as string,
   }
   if (!validateProjectSnapshot(snapshot)) {

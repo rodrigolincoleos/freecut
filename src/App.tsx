@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { indexedDbProjectRepository } from './data/indexedDbProjectRepository'
 import { createProjectBackup, readProjectBackup } from './domain/projectBackup'
-import type { CaptionSegment, CaptionStyle, ProjectAsset, ProjectMedia, ProjectSnapshot } from './domain/project'
+import type { CaptionSegment, CaptionStyle, ProjectAsset, ProjectMedia, ProjectSnapshot, VideoAspectRatio } from './domain/project'
 import { downloadBlob } from './utils/download'
 
 type MediaItem = ProjectMedia & {
@@ -37,6 +37,61 @@ const captionStyles: { id: CaptionStyle; name: string; sample: string }[] = [
   { id: 'serif', name: 'Serif', sample: 'zorro' },
   { id: 'minimal', name: 'Minimal', sample: 'THE QUICK BROWN FOX' },
 ]
+
+const aspectRatios: { id: VideoAspectRatio; name: string; value: number | null }[] = [
+  { id: 'original', name: 'Original', value: null },
+  { id: '9:16', name: '9:16', value: 9 / 16 },
+  { id: '16:9', name: '16:9', value: 16 / 9 },
+  { id: '1:1', name: '1:1', value: 1 },
+  { id: '4:3', name: '4:3', value: 4 / 3 },
+  { id: '3:4', name: '3:4', value: 3 / 4 },
+  { id: '3:2', name: '3:2', value: 3 / 2 },
+  { id: '2:1', name: '2:1', value: 2 },
+  { id: '2.35:1', name: '2.35:1', value: 2.35 },
+  { id: '1.85:1', name: '1.85:1', value: 1.85 },
+  { id: '128:27', name: '128:27', value: 128 / 27 },
+]
+
+function getAspectRatioValue(ratio: VideoAspectRatio, width: number, height: number) {
+  return aspectRatios.find((item) => item.id === ratio)?.value ?? (width && height ? width / height : 16 / 9)
+}
+
+function getExportDimensions(width: number, height: number, ratio: VideoAspectRatio) {
+  if (ratio === 'original' || !width || !height) return { width: width || 1280, height: height || 720 }
+  const aspect = getAspectRatioValue(ratio, width, height)
+  const sourceAspect = width / height
+  const outputWidth = sourceAspect > aspect ? Math.round(height * aspect) : width
+  const outputHeight = sourceAspect > aspect ? height : Math.round(width / aspect)
+  return {
+    width: Math.max(2, outputWidth - outputWidth % 2),
+    height: Math.max(2, outputHeight - outputHeight % 2),
+  }
+}
+
+function drawVideoFrame(
+  context: CanvasRenderingContext2D,
+  video: HTMLVideoElement,
+  width: number,
+  height: number,
+  ratio: VideoAspectRatio,
+) {
+  const sourceWidth = video.videoWidth
+  const sourceHeight = video.videoHeight
+  const targetRatio = width / height
+  const sourceRatio = sourceWidth / sourceHeight
+  if (ratio === 'original' || Math.abs(targetRatio - sourceRatio) < 0.001) {
+    context.drawImage(video, 0, 0, width, height)
+    return
+  }
+
+  if (sourceRatio > targetRatio) {
+    const cropWidth = sourceHeight * targetRatio
+    context.drawImage(video, (sourceWidth - cropWidth) / 2, 0, cropWidth, sourceHeight, 0, 0, width, height)
+  } else {
+    const cropHeight = sourceWidth / targetRatio
+    context.drawImage(video, 0, (sourceHeight - cropHeight) / 2, sourceWidth, cropHeight, 0, 0, width, height)
+  }
+}
 
 function drawCaption(
   context: CanvasRenderingContext2D,
@@ -153,14 +208,19 @@ function App() {
   const [overlayText, setOverlayText] = useState('')
   const [captionSegments, setCaptionSegments] = useState<CaptionSegment[]>([])
   const [captionStyle, setCaptionStyle] = useState<CaptionStyle>('classic')
+  const [aspectRatio, setAspectRatio] = useState<VideoAspectRatio>('original')
+  const [isAspectMenuOpen, setIsAspectMenuOpen] = useState(false)
   const [transcriptionLanguage, setTranscriptionLanguage] = useState('es')
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [filter, setFilter] = useState(filters[0])
+  const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 })
+  const [previewStageSize, setPreviewStageSize] = useState({ width: 0, height: 0 })
   const [isExporting, setIsExporting] = useState(false)
   const [pendingExport, setPendingExport] = useState<{ blob: Blob; filename: string } | null>(null)
   const [notice, setNotice] = useState('')
   const [dragId, setDragId] = useState('')
   const videoRef = useRef<HTMLVideoElement>(null)
+  const previewStageRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const backupInputRef = useRef<HTMLInputElement>(null)
   const mediaRef = useRef(media)
@@ -189,6 +249,25 @@ function App() {
     (total, item) => total + Math.max(item.trimEnd - item.trimStart, 0),
     0,
   )
+  const previewAspectRatio = getAspectRatioValue(aspectRatio, videoDimensions.width, videoDimensions.height)
+  const previewFrameHeight = Math.min(
+    previewStageSize.height,
+    previewStageSize.width / previewAspectRatio,
+  )
+  const previewFrameWidth = previewFrameHeight * previewAspectRatio
+
+  useEffect(() => {
+    const stage = previewStageRef.current
+    if (!stage) return
+    const observer = new ResizeObserver(([entry]) => {
+      setPreviewStageSize({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      })
+    })
+    observer.observe(stage)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -213,6 +292,7 @@ function App() {
         setOverlayText(saved.snapshot.overlayText)
         setCaptionSegments(saved.snapshot.captionSegments)
         setCaptionStyle(saved.snapshot.captionStyle)
+        setAspectRatio(saved.snapshot.aspectRatio)
         setFilter(filters.find((item) => item.name === saved.snapshot.filterName) ?? filters[0])
       }
       setStorageAvailable(true)
@@ -259,7 +339,7 @@ function App() {
   useEffect(() => {
     if (!isReady || !storageAvailable) return
     const snapshot: ProjectSnapshot = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       id: 'default',
       name: projectName.trim() || 'Proyecto sin título',
       updatedAt: Date.now(),
@@ -268,6 +348,7 @@ function App() {
       overlayText,
       captionSegments,
       captionStyle,
+      aspectRatio,
       filterName: filter.name,
     }
     const assets = media.map((item) => ({ id: item.id, blob: item.file }))
@@ -287,7 +368,7 @@ function App() {
       })
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [isReady, storageAvailable, projectName, media, activeVideo?.id, overlayText, captionSegments, captionStyle, filter.name])
+  }, [isReady, storageAvailable, projectName, media, activeVideo?.id, overlayText, captionSegments, captionStyle, aspectRatio, filter.name])
 
   useEffect(() => {
     mediaRef.current = media
@@ -614,8 +695,9 @@ function App() {
     video.pause()
     setIsPlaying(false)
     const canvas = document.createElement('canvas')
-    canvas.width = video.videoWidth || 1280
-    canvas.height = video.videoHeight || 720
+    const outputSize = getExportDimensions(video.videoWidth, video.videoHeight, aspectRatio)
+    canvas.width = outputSize.width
+    canvas.height = outputSize.height
     const context = canvas.getContext('2d')
     if (!context) {
       setIsExporting(false)
@@ -697,7 +779,7 @@ function App() {
         return
       }
       context.filter = filter.css
-      context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      drawVideoFrame(context, video, canvas.width, canvas.height, aspectRatio)
       context.filter = 'none'
       if (overlayText.trim()) {
         const fontSize = Math.max(24, Math.round(canvas.width * 0.045))
@@ -743,7 +825,7 @@ function App() {
 
   const exportBackup = () => {
     const snapshot: ProjectSnapshot = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       id: 'default',
       name: projectName.trim() || 'Proyecto sin título',
       updatedAt: Date.now(),
@@ -752,6 +834,7 @@ function App() {
       overlayText,
       captionSegments,
       captionStyle,
+      aspectRatio,
       filterName: filter.name,
     }
     const assets: ProjectAsset[] = media.map((item) => ({ id: item.id, blob: item.file }))
@@ -814,6 +897,7 @@ function App() {
       setOverlayText(snapshot.overlayText)
       setCaptionSegments(snapshot.captionSegments)
       setCaptionStyle(snapshot.captionStyle)
+      setAspectRatio(snapshot.aspectRatio)
       setFilter(filters.find((item) => item.name === snapshot.filterName) ?? filters[0])
       setActivePanel('media')
       setIsPlaying(false)
@@ -1155,18 +1239,58 @@ function App() {
         <section className="editor-area">
           <div className="preview-toolbar">
             <div className="preview-label"><span className="live-dot" /> VISTA PREVIA <span className="divider">/</span> {activeVideo?.file.name ?? 'Sin clip seleccionado'}</div>
-            <button className="ratio-button" onClick={() => setNotice('El lienzo se ajusta al formato original del clip.')}>Original <span>⌄</span></button>
+            <div className="ratio-control">
+              <button
+                className="ratio-button"
+                type="button"
+                aria-haspopup="true"
+                aria-expanded={isAspectMenuOpen}
+                onClick={() => setIsAspectMenuOpen((open) => !open)}
+              >
+                {aspectRatios.find((item) => item.id === aspectRatio)?.name ?? 'Original'} <span>⌄</span>
+              </button>
+              {isAspectMenuOpen && (
+                <div className="ratio-menu" role="group" aria-label="Formato del video">
+                  {aspectRatios.map((option) => (
+                    <button
+                      className={`ratio-option ${aspectRatio === option.id ? 'selected' : ''}`}
+                      key={option.id}
+                      type="button"
+                      aria-pressed={aspectRatio === option.id}
+                      onClick={() => {
+                        setAspectRatio(option.id)
+                        setIsAspectMenuOpen(false)
+                      }}
+                    >
+                      <span className="ratio-option-icon" style={{ aspectRatio: option.value ? String(option.value) : String(previewAspectRatio) }} />
+                      <span>{option.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="preview-stage">
+          <div className="preview-stage" ref={previewStageRef}>
             {activeVideo ? (
-              <div className="video-frame">
+              <div
+                className="video-frame"
+                style={{
+                  aspectRatio: String(previewAspectRatio),
+                  width: previewFrameWidth ? `${previewFrameWidth}px` : undefined,
+                  height: previewFrameHeight ? `${previewFrameHeight}px` : undefined,
+                }}
+              >
                 <video
                   key={activeVideo.id}
                   ref={videoRef}
                   src={activeVideo.url}
                   onLoadedMetadata={(event) => {
                     updateDuration(activeVideo.id, event.currentTarget.duration)
+                    setVideoDimensions({
+                      width: event.currentTarget.videoWidth,
+                      height: event.currentTarget.videoHeight,
+                    })
                   }}
                   onTimeUpdate={handleTimeUpdate}
                   onPlay={() => setIsPlaying(true)}
